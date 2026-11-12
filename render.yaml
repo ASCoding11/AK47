@@ -1,0 +1,17 @@
+# One-click deploy on Render: https://render.com/deploy
+services:
+  - type: web
+    name: crowdline
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/config
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: SECURE_COOKIE
+        value: "true"
+      # The free plan has no persistent disk, so accounts and markets reset on
+      # every deploy or restart. To keep them, attach a disk and set DB_PATH to
+      # a file on it, e.g. /var/data/crowdline.db.

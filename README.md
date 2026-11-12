@@ -55,3 +55,10 @@ checks or login rate limiting, and there is no way to sell a position before
 resolution other than buying the opposite side. Operating a real-money event
 market is regulated in most places (in the US, by the CFTC and state gambling
 law), so get legal advice and licensing before connecting payments.
+
+## Put it online
+
+`render.yaml` describes a ready-to-deploy web service for [Render](https://render.com).
+Create a Blueprint from this repository there and it will build and serve the
+site at a public `onrender.com` address. On the free plan the database resets
+whenever the service restarts; attach a disk and set `DB_PATH` to keep data.
