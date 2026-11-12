@@ -4,15 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crowdline — trade on what happens next</title>
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="top">
     <a class="brand" href="#/">Crowd<span>line</span></a>
     <nav id="nav"></nav>
   </header>
+  <div id="demo-note" class="demo-note" hidden>
+    <span>Demo: this exchange runs entirely in your browser with play money. The example markets and traders are simulated, and nothing you do is shared with anyone else.</span>
+    <button class="link" data-action="resetDemo">Reset demo</button>
+  </div>
   <main id="view"></main>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

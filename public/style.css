@@ -43,6 +43,13 @@ nav a:hover, nav a.active { color: var(--text); background: var(--panel); }
 nav .spacer { flex: 1; }
 .balance { padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; font-weight: 600; }
 
+.demo-note {
+  display: flex; gap: 12px; align-items: center; justify-content: center; flex-wrap: wrap;
+  padding: 8px 16px; font-size: 13px; color: var(--muted); text-align: center;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.demo-note[hidden] { display: none; }
+
 main { max-width: 1120px; margin: 0 auto; padding: 24px 16px 64px; }
 
 button, .btn {

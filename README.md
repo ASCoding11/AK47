@@ -62,3 +62,21 @@ law), so get legal advice and licensing before connecting payments.
 Create a Blueprint from this repository there and it will build and serve the
 site at a public `onrender.com` address. On the free plan the database resets
 whenever the service restarts; attach a disk and set `DB_PATH` to keep data.
+
+## GitHub Pages version
+
+GitHub Pages only serves static files, so it cannot run `server.js`. The
+`docs/` folder holds a static build of the same app in which the exchange runs
+inside each visitor's browser and saves to `localStorage`. It opens with
+example markets and simulated traders, and the first account a visitor creates
+is the admin of their own copy. Nothing is shared between visitors, so it is a
+demo of the product, not a live exchange.
+
+After changing anything in `public/` or `src/local-*.js`, rebuild it:
+
+```sh
+npm run build:pages
+```
+
+To publish it: make the repository public, then in **Settings → Pages** choose
+**Deploy from a branch**, pick the branch and the `/docs` folder, and save.

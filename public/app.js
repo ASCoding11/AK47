@@ -1,3 +1,5 @@
+import { request } from './transport.js';
+
 const view = document.getElementById('view');
 const nav = document.getElementById('nav');
 const toastEl = document.getElementById('toast');
@@ -21,15 +23,8 @@ const date = (ms) => new Date(ms).toLocaleString([], { dateStyle: 'medium', time
 const fee = (profit) => (profit > 0 ? Math.floor((profit * state.config.feeBps) / 10000) : 0);
 const feePct = () => `${state.config.feeBps / 100}%`;
 
-async function api(path, { method = 'GET', body } = {}) {
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers: method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
-    body: method === 'POST' ? JSON.stringify(body ?? {}) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error ?? 'Request failed');
-  return data;
+function api(path, { method = 'GET', body } = {}) {
+  return request(method, path, body);
 }
 
 let toastTimer;
@@ -487,6 +482,12 @@ const actions = {
     toast(outcome === 'void' ? 'Market voided' : `Market resolved. Fees collected: ${money(fees)}`);
     render();
   },
+  async resetDemo() {
+    if (!confirm('Erase every account, market and trade in this browser and start over with the example markets?')) return;
+    await api('/reset-demo', { method: 'POST' });
+    location.hash = '#/';
+    location.reload();
+  },
   async faucet() {
     await api('/faucet', { method: 'POST' });
     toast('Demo credits added');
@@ -566,4 +567,7 @@ document.addEventListener('input', (e) => {
 window.addEventListener('hashchange', render);
 
 state.config = await api('/config');
+if (state.config.local) {
+  document.getElementById('demo-note').hidden = false;
+}
 render();

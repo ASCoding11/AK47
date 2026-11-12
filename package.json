@@ -4,9 +4,12 @@
   "description": "Peer-to-peer prediction market exchange with user-created markets and a 10% fee on profit",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "build:pages": "node scripts/build-pages.js"
   }
 }
