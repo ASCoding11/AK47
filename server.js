@@ -3,16 +3,20 @@ import { readFile, mkdir } from 'node:fs/promises';
 import { dirname, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ApiError, CATEGORIES, FEE_BPS, createEngine } from './src/engine.js';
+import { createGoogleVerifier } from './src/google-auth.js';
+import { SITE_CONFIG } from './src/site-config.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(ROOT, 'public');
 const PORT = Number(process.env.PORT ?? 3000);
 const DB_PATH = process.env.DB_PATH ?? join(ROOT, 'data', 'crowdline.db');
-const DEMO = process.env.DEMO_MODE !== 'false';
 const SECURE_COOKIE = process.env.SECURE_COOKIE === 'true';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? SITE_CONFIG.googleClientId;
+const ADS = { ...SITE_CONFIG.ads, client: process.env.ADSENSE_CLIENT ?? SITE_CONFIG.ads.client };
 
 await mkdir(dirname(DB_PATH), { recursive: true });
-const engine = createEngine(DB_PATH, { demo: DEMO });
+const engine = createEngine(DB_PATH);
+const verifyGoogleToken = createGoogleVerifier({ clientId: GOOGLE_CLIENT_ID });
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -55,9 +59,17 @@ const routes = [];
 const route = (method, pattern, handler, { auth = false } = {}) =>
   routes.push({ method, re: new RegExp(`^${pattern.replace(/:id/g, '(\\d+)')}$`), handler, auth });
 
-route('GET', '/api/config', () => ({ feeBps: FEE_BPS, categories: CATEGORIES, demo: DEMO }));
+route('GET', '/api/config', () => ({ feeBps: FEE_BPS, categories: CATEGORIES, googleClientId: GOOGLE_CLIENT_ID, ads: ADS }));
 route('GET', '/api/me', ({ user }) => ({ user }));
+route('POST', '/api/google', async ({ body, res }) => {
+  const claims = await verifyGoogleToken(body.credential);
+  const { user, token, isNew } = engine.googleSignIn(claims, body.agree === true || body.agree === 'on');
+  res.setHeader('Set-Cookie', sessionCookie(token));
+  return { user, isNew };
+});
 route('POST', '/api/register', ({ body, res }) => {
+  // With Google sign-in configured, new accounts come only from Google.
+  if (GOOGLE_CLIENT_ID) throw new ApiError(403, 'Sign in with Google to create an account');
   const { user, token } = engine.register(body.username, body.password, body.agree === true || body.agree === 'on');
   res.setHeader('Set-Cookie', sessionCookie(token));
   return { user };
@@ -72,7 +84,6 @@ route('POST', '/api/logout', ({ req, res }) => {
   res.setHeader('Set-Cookie', sessionCookie(null));
   return {};
 });
-route('POST', '/api/faucet', ({ user }) => ({ user: engine.faucet(user.id) }), { auth: true });
 
 route('GET', '/api/markets', ({ query }) => ({
   markets: engine.listMarkets({
@@ -108,6 +119,12 @@ async function handleApi(req, res, url) {
 }
 
 async function serveStatic(res, pathname) {
+  // AdSense checks /ads.txt at the domain root to confirm who may sell ads here.
+  if (pathname === '/ads.txt' && ADS.client) {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end(`google.com, ${ADS.client.replace(/^ca-/, '')}, DIRECT, f08c47fec0942fa0\n`);
+    return;
+  }
   const rel = normalize(pathname === '/' ? '/index.html' : pathname);
   const file = join(PUBLIC, rel);
   if (!file.startsWith(PUBLIC + sep)) throw new ApiError(404, 'Not found');
@@ -123,7 +140,9 @@ async function serveStatic(res, pathname) {
 const server = createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'");
+  // Google sign-in and AdSense load scripts and frames from many Google hosts,
+  // so the policy only blocks plugins, base-tag hijacking and framing this site.
+  res.setHeader('Content-Security-Policy', "object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
   try {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname.startsWith('/api/')) {
@@ -144,5 +163,5 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Crowdline running at http://localhost:${PORT}${DEMO ? ' (demo credits enabled)' : ''}`);
+  console.log(`Crowdline running at http://localhost:${PORT}${GOOGLE_CLIENT_ID ? '' : ' (Google sign-in not configured)'}`);
 });

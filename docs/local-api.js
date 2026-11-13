@@ -1,6 +1,7 @@
 // The server's HTTP API, answered in the browser by src/local-engine.js.
 // Used by the static GitHub Pages build, where there is no server.
 import { ApiError, CATEGORIES, FEE_BPS, createEngine } from './local-engine.js';
+import { SITE_CONFIG } from './site-config.js';
 
 const STATE_KEY = 'crowdline:state';
 const SESSION_KEY = 'crowdline:session';
@@ -64,7 +65,20 @@ export function seedExamples(engine, now = Date.now()) {
   });
 }
 
-export function createLocalApi({ storage = globalThis.localStorage, now } = {}) {
+// Reads the claims from a Google ID token without checking its signature:
+// the static site has no server to do that. It still checks the token was
+// issued for this site and hasn't expired.
+function decodeGoogleToken(token, clientId, nowMs) {
+  try {
+    const part = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = new TextDecoder().decode(Uint8Array.from(atob(part), (c) => c.charCodeAt(0)));
+    const claims = JSON.parse(json);
+    if (claims.aud === clientId && claims.exp * 1000 > nowMs && claims.sub) return claims;
+  } catch {}
+  throw new ApiError(401, 'Invalid Google sign-in');
+}
+
+export function createLocalApi({ storage = globalThis.localStorage, now, config = SITE_CONFIG } = {}) {
   let engine = createEngine({ storage, key: STATE_KEY, now });
   if (engine.isEmpty()) seedExamples(engine, now ? now() : Date.now());
 
@@ -85,9 +99,17 @@ export function createLocalApi({ storage = globalThis.localStorage, now } = {}) 
   const route = (method, pattern, handler, auth = false) =>
     routes.push({ method, re: new RegExp(`^${pattern.replace(/:id/g, '(\\d+)')}$`), handler, auth });
 
-  route('GET', '/config', () => ({ feeBps: FEE_BPS, categories: CATEGORIES, demo: true, local: true }));
+  route('GET', '/config', () => ({ feeBps: FEE_BPS, categories: CATEGORIES, local: true, googleClientId: config.googleClientId, ads: config.ads }));
+  route('POST', '/google', ({ body }) => {
+    if (!config.googleClientId) throw new ApiError(400, 'Google sign-in is not set up on this site');
+    const claims = decodeGoogleToken(body.credential, config.googleClientId, now ? now() : Date.now());
+    const { user, token: t, isNew } = engine.googleSignIn(claims, body.agree === true || body.agree === 'on');
+    setToken(t);
+    return { user, isNew };
+  });
   route('GET', '/me', ({ user }) => ({ user }));
   route('POST', '/register', async ({ body }) => {
+    if (config.googleClientId) throw new ApiError(403, 'Sign in with Google to create an account');
     const { user, token: t } = await engine.register(body.username, body.password, body.agree === true || body.agree === 'on');
     setToken(t);
     return { user };
@@ -111,7 +133,6 @@ export function createLocalApi({ storage = globalThis.localStorage, now } = {}) 
     seedExamples(engine, now ? now() : Date.now());
     return {};
   });
-  route('POST', '/faucet', ({ user }) => ({ user: engine.faucet(user.id) }), true);
   route('GET', '/markets', ({ query }) => ({
     markets: engine.listMarkets({ status: query.get('status') ?? 'open', category: query.get('category'), search: query.get('q') }),
   }));

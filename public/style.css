@@ -149,3 +149,21 @@ td.r, th.r { text-align: right; }
 .terms { max-width: 720px; }
 .terms h2 { margin-top: 22px; }
 .terms p { max-width: 65ch; }
+
+.signin { display: grid; gap: 16px; }
+.signin p { margin: 0; }
+.google-button { min-height: 44px; display: flex; align-items: center; }
+.ad { position: relative; margin: 0 0 18px; }
+.ad-label { display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+.ad-placeholder {
+  display: flex; align-items: center; justify-content: center; min-height: 90px;
+  border: 1px dashed var(--line); border-radius: var(--radius);
+}
+.ad-placeholder .ad-label { margin: 0; }
+.ad-marketSide.ad-placeholder { min-height: 250px; }
+.grid > .ad { grid-column: 1 / -1; margin: 0; }
+.site-footer {
+  max-width: 1120px; margin: 0 auto; padding: 0 16px 40px;
+  display: flex; gap: 8px 16px; flex-wrap: wrap; color: var(--muted); font-size: 13px;
+}
+.site-footer a:hover { color: var(--text); }

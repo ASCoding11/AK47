@@ -14,6 +14,7 @@ const files = {
   'transport.js': 'pages/transport.js',
   'local-api.js': 'src/local-api.js',
   'local-engine.js': 'src/local-engine.js',
+  'site-config.js': 'src/site-config.js',
 };
 
 await rm(OUT, { recursive: true, force: true });

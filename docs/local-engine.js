@@ -14,8 +14,8 @@
 export const FEE_BPS = 1000; // 10% of profit
 export const DISPUTE_WINDOW_MS = 24 * 3_600_000; // traders' time to dispute a creator's result
 export const CATEGORIES = ['Politics', 'Sports', 'Economics', 'Tech', 'Culture', 'Science', 'Other'];
-const SIGNUP_BONUS = 100_000;
-const FAUCET_AMOUNT = 50_000;
+// Balances are play money ("Avenues") in hundredths: 100 units = 1 Avenue.
+export const WELCOME_BONUS = 100_000; // 1,000 Avenues, once per account
 const MAX_QTY = 100_000;
 
 export class ApiError extends Error {
@@ -134,8 +134,31 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
       const first = !s.users.some((u) => !u.example);
       const u = { id: nextId('user'), username, pw: `${salt}:${hash}`, balance: 0, is_admin: first, example: false, created_at: now() };
       s.users.push(u);
-      if (demo) adjust(u.id, SIGNUP_BONUS, 'deposit');
+      if (demo) adjust(u.id, WELCOME_BONUS, 'deposit');
       return { user: publicUser(u), token: newSession(u.id) };
+    });
+  }
+
+  // Signs in with a Google identity. On the static site there is no server to
+  // verify Google's signature, so this trusts the decoded token: fine for play
+  // money that lives only in this browser.
+  function googleSignIn({ sub, name, email }, agreed = false) {
+    sub = String(sub ?? '');
+    if (!sub) throw new ApiError(401, 'Invalid Google sign-in');
+    return tx(() => {
+      const existing = s.users.find((u) => u.google_sub === sub);
+      if (existing) return { user: publicUser(existing), token: newSession(existing.id), isNew: false };
+      if (!agreed) throw new ApiError(400, 'Confirm you are 18 or older and agree to the terms');
+      let base = String(name || String(email ?? '').split('@')[0]).normalize('NFKD')
+        .replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 16);
+      if (base.length < 3) base = `member${base}`;
+      let username = base;
+      for (let i = 2; findByName(username); i++) username = `${base}${i}`;
+      const first = !s.users.some((u) => !u.example);
+      const u = { id: nextId('user'), username, pw: null, google_sub: sub, balance: 0, is_admin: first, example: false, created_at: now() };
+      s.users.push(u);
+      adjust(u.id, WELCOME_BONUS, 'deposit');
+      return { user: publicUser(u), token: newSession(u.id), isNew: true };
     });
   }
 
@@ -144,7 +167,7 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
     return tx(() => {
       const u = { id: nextId('user'), username, pw: null, balance: 0, is_admin: false, example: true, created_at: now() };
       s.users.push(u);
-      adjust(u.id, SIGNUP_BONUS * 10, 'deposit');
+      adjust(u.id, WELCOME_BONUS * 10, 'deposit');
       return publicUser(u);
     });
   }
@@ -176,14 +199,6 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
 
   function getUser(id) {
     return publicUser(userRow(id));
-  }
-
-  function faucet(userId) {
-    if (!demo) throw new ApiError(403, 'Demo credits are disabled');
-    return tx(() => {
-      adjust(userId, FAUCET_AMOUNT, 'deposit');
-      return getUser(userId);
-    });
   }
 
   // ---------- markets ----------
@@ -542,7 +557,7 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   }
 
   return {
-    demo, register, login, logout, userForToken, getUser, faucet, createExampleUser,
+    demo, register, googleSignIn, login, logout, userForToken, getUser, createExampleUser,
     createMarket, getMarket, listMarkets, marketDetail,
     placeOrder, cancelOrder, proposeResolution, disputeResolution, resolveMarket, reportMarket,
     portfolio, stats, isEmpty,

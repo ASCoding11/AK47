@@ -13,8 +13,9 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 export const FEE_BPS = 1000; // 10% of profit
 export const DISPUTE_WINDOW_MS = 24 * 3_600_000; // traders' time to dispute a creator's result
 export const CATEGORIES = ['Politics', 'Sports', 'Economics', 'Tech', 'Culture', 'Science', 'Other'];
-const SIGNUP_BONUS = 100_000; // demo credits: $1,000
-const FAUCET_AMOUNT = 50_000;
+// Balances are play money ("Avenues") in hundredths: 100 units = 1 Avenue,
+// and every contract pays 1 Avenue to the winning side.
+export const WELCOME_BONUS = 100_000; // 1,000 Avenues, once per account
 const MAX_QTY = 100_000;
 
 export class ApiError extends Error {
@@ -110,6 +111,7 @@ const MIGRATIONS = [
   'ALTER TABLE markets ADD COLUMN proposed_at INTEGER',
   'ALTER TABLE markets ADD COLUMN dispute_reason TEXT',
   'ALTER TABLE markets ADD COLUMN disputed_by INTEGER',
+  'ALTER TABLE users ADD COLUMN google_sub TEXT',
 ];
 
 function hashPassword(password) {
@@ -137,6 +139,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
       db.exec(sql);
     } catch {}
   }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_google ON users(google_sub)');
 
   const q = (sql) => db.prepare(sql);
 
@@ -186,14 +189,42 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
         'INSERT INTO users (username, pw_hash, is_admin, created_at) VALUES (?,?,?,?)',
       ).run(username, hashPassword(password), first ? 1 : 0, now());
       const id = Number(lastInsertRowid);
-      if (demo) adjust(id, SIGNUP_BONUS, 'deposit');
+      if (demo) adjust(id, WELCOME_BONUS, 'deposit');
       return { user: getUser(id), token: newSession(id) };
     });
   }
 
+  // Signs in with a verified Google identity. A Google account's first
+  // sign-in creates the member and grants WELCOME_BONUS, exactly once.
+  function googleSignIn({ sub, name, email }, agreed = false) {
+    sub = String(sub ?? '');
+    if (!sub) throw new ApiError(401, 'Invalid Google sign-in');
+    return tx(() => {
+      const existing = q('SELECT * FROM users WHERE google_sub = ?').get(sub);
+      if (existing) return { user: publicUser(existing), token: newSession(existing.id), isNew: false };
+      if (!agreed) throw new ApiError(400, 'Confirm you are 18 or older and agree to the terms');
+      const username = uniqueUsername(name || String(email ?? '').split('@')[0]);
+      const first = q('SELECT COUNT(*) AS n FROM users').get().n === 0;
+      const { lastInsertRowid } = q(
+        'INSERT INTO users (username, pw_hash, is_admin, google_sub, created_at) VALUES (?,?,?,?,?)',
+      ).run(username, '', first ? 1 : 0, sub, now());
+      const id = Number(lastInsertRowid);
+      adjust(id, WELCOME_BONUS, 'deposit');
+      return { user: getUser(id), token: newSession(id), isNew: true };
+    });
+  }
+
+  function uniqueUsername(raw) {
+    let base = String(raw ?? '').normalize('NFKD').replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 16);
+    if (base.length < 3) base = `member${base}`;
+    let name = base;
+    for (let i = 2; q('SELECT 1 FROM users WHERE username = ?').get(name); i++) name = `${base}${i}`;
+    return name;
+  }
+
   function login(username, password) {
     const u = q('SELECT * FROM users WHERE username = ?').get(String(username ?? '').trim());
-    if (!u || !checkPassword(String(password ?? ''), u.pw_hash)) {
+    if (!u || !u.pw_hash || !checkPassword(String(password ?? ''), u.pw_hash)) {
       throw new ApiError(401, 'Wrong username or password');
     }
     return { user: publicUser(u), token: newSession(u.id) };
@@ -218,14 +249,6 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
 
   function getUser(id) {
     return publicUser(q('SELECT * FROM users WHERE id = ?').get(id));
-  }
-
-  function faucet(userId) {
-    if (!demo) throw new ApiError(403, 'Demo credits are disabled');
-    return tx(() => {
-      adjust(userId, FAUCET_AMOUNT, 'deposit');
-      return getUser(userId);
-    });
   }
 
   // ---------- markets ----------
@@ -616,7 +639,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   }
 
   return {
-    db, demo, register, login, logout, userForToken, getUser, faucet,
+    db, demo, register, googleSignIn, login, logout, userForToken, getUser,
     createMarket, getMarket, listMarkets, marketDetail,
     placeOrder, cancelOrder, proposeResolution, disputeResolution, resolveMarket, reportMarket,
     portfolio, stats,

@@ -8,7 +8,7 @@ const state = {
   user: null,
   config: { feeBps: 1000, categories: [], demo: false },
   filters: { status: 'open', category: '', q: '' },
-  ticket: { side: 'yes', price: null, qty: 10 },
+  ticket: { side: 'yes', price: null, qty: 100 },
   detail: null,
 };
 
@@ -16,8 +16,13 @@ const state = {
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const money = (cents) =>
-  `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+// Balances are play money: 100 units = 1 Avenue. Contracts pay 1 Avenue, and a
+// contract's price (1-99) reads as a percentage of that Avenue.
+const money = (units) => {
+  const n = Math.abs(units) / 100;
+  const text = n.toLocaleString('en-US', { minimumFractionDigits: Number.isInteger(n) ? 0 : 2, maximumFractionDigits: 2 });
+  return `${units < 0 ? '-' : ''}${text} ${n === 1 ? 'Avenue' : 'Avenues'}`;
+};
 const signed = (cents) => (cents > 0 ? '+' : '') + money(cents);
 const date = (ms) => new Date(ms).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 const fee = (profit) => (profit > 0 ? Math.floor((profit * state.config.feeBps) / 10000) : 0);
@@ -56,7 +61,9 @@ function renderNav() {
       ? `<span class="balance num" title="Available balance">${money(u.balance)}</span>
          <span class="muted">${esc(u.username)}</span>
          <button class="link" data-action="logout">Log out</button>`
-      : `${link('#/login', 'Log in')}<a class="btn primary" href="#/signup">Sign up</a>`}`;
+      : state.config.googleClientId
+        ? `<a class="btn primary" href="#/signin">Sign in · 1,000 free Avenues</a>`
+        : `${link('#/login', 'Log in')}<a class="btn primary" href="#/signup">Sign up</a>`}`;
 }
 
 function statusBadge(m) {
@@ -95,10 +102,12 @@ async function marketsPage() {
   view.innerHTML = `
     <div class="hero">
       <h1>Trade on what happens next</h1>
-      <p>Crowdline is a marketplace. Members create markets, trade with each other, and each market’s creator
-      reports the result. We never take a side: every contract pays $1.00 to the side that is right, funded by the other side.
-      We keep ${feePct()} of your profit, and nothing when you lose. <a class="yes" href="#/terms">How it works</a></p>
+      <p>Crowdline is a play-money prediction marketplace. Members create markets, trade with each other in Avenues,
+      and each market’s creator reports the result. Every contract pays 1 Avenue to the side that is right.
+      ${state.user ? '' : `<a class="yes" href="${signInHref()}">Sign in${state.config.googleClientId ? ' with Google' : ''}</a> and get 1,000 Avenues free.`}
+      Avenues have no cash value. <a class="yes" href="#/terms">How it works</a></p>
     </div>
+    ${adSlot('marketsTop')}
     <div class="filters">
       <input id="search" type="search" placeholder="Search markets" value="${esc(f.q)}">
       <div class="chips">
@@ -109,7 +118,7 @@ async function marketsPage() {
       ${chip('category', '', 'All')}${state.config.categories.map((c) => chip('category', c, c)).join('')}
     </div>
     ${markets.length
-      ? `<div class="grid">${markets.map(card).join('')}</div>`
+      ? `<div class="grid">${markets.map((m, i) => card(m) + (i === 5 && markets.length > 6 ? adSlot('marketsInline') : '')).join('')}</div>`
       : `<div class="empty">No markets here yet. <a class="yes" href="#/create">Create the first one.</a></div>`}`;
 }
 
@@ -139,7 +148,7 @@ async function marketPage(id) {
   const bestNo = d.book.no[0]?.price;
   const bestYes = d.book.yes[0]?.price;
   if (state.ticket.marketId !== m.id) {
-    state.ticket = { marketId: m.id, side: 'yes', qty: 10, price: bestNo ? 100 - bestNo : m.lastPrice ?? 50 };
+    state.ticket = { marketId: m.id, side: 'yes', qty: 100, price: bestNo ? 100 - bestNo : m.lastPrice ?? 50 };
   }
   const p = impliedPrice({ ...m, yesBid: bestYes, yesAsk: bestNo ? 100 - bestNo : null });
   const isCreator = state.user?.id === m.creatorId;
@@ -156,7 +165,7 @@ async function marketPage(id) {
           <span>Created by ${esc(m.creator)}</span>
         </div>
         <div class="panel">
-          <h2>YES price ${p == null ? '' : `· <span class="yes">${p}¢</span>`}</h2>
+          <h2>YES price ${p == null ? '' : `· <span class="yes">${p}%</span>`}</h2>
           ${chart(d.trades)}
         </div>
         <div class="panel">
@@ -165,7 +174,7 @@ async function marketPage(id) {
             ${bookSide('yes', d.book.yes)}
             ${bookSide('no', d.book.no)}
           </div>
-          <p class="muted small" style="margin:12px 0 0">A YES bid at 60¢ trades with a NO bid at 40¢ or more: together they fund the $1.00 payout.</p>
+          <p class="muted small" style="margin:12px 0 0">A YES bid at 60% trades with a NO bid at 40% or more: together they fund the 1 Avenue payout.</p>
         </div>
         <div class="panel">
           <h2>How this resolves</h2>
@@ -186,7 +195,7 @@ async function marketPage(id) {
           <h2>Recent trades</h2>
           ${d.trades.length
             ? `<table><tr><th>Time</th><th class="r">YES price</th><th class="r">Contracts</th></tr>
-               ${d.trades.slice(0, 15).map((t) => `<tr><td class="muted">${date(t.at)}</td><td class="r num">${t.yesPrice}¢</td><td class="r num">${t.qty}</td></tr>`).join('')}</table>`
+               ${d.trades.slice(0, 15).map((t) => `<tr><td class="muted">${date(t.at)}</td><td class="r num">${t.yesPrice}%</td><td class="r num">${t.qty}</td></tr>`).join('')}</table>`
             : '<div class="muted">No trades yet.</div>'}
         </div>
       </div>
@@ -195,6 +204,7 @@ async function marketPage(id) {
         ${m.status === 'open' ? '<div class="panel" id="ticket"></div>' : ''}
         ${positionPanel(d)}
         ${ordersPanel(d)}
+        ${adSlot('marketSide')}
         ${state.user?.isAdmin && !['resolved', 'voided'].includes(m.status) ? `
           <div class="panel">
             <h2>Admin decision</h2>
@@ -260,7 +270,7 @@ function bookSide(side, levels) {
     <table>
       <tr><th class="${side}">${side.toUpperCase()} bids</th><th class="r">Contracts</th></tr>
       ${levels.length
-        ? levels.map((l) => `<tr><td class="num ${side}">${l.price}¢</td><td class="r num">${l.qty.toLocaleString()}</td></tr>`).join('')
+        ? levels.map((l) => `<tr><td class="num ${side}">${l.price}%</td><td class="r num">${l.qty.toLocaleString()}</td></tr>`).join('')
         : '<tr><td colspan="2" class="muted">No bids</td></tr>'}
     </table>`;
 }
@@ -283,8 +293,8 @@ function renderTicket() {
   const el = document.getElementById('ticket');
   if (!el) return;
   if (!state.user) {
-    el.innerHTML = `<h2>Trade</h2><p class="muted">Log in to place an order.</p>
-      <a class="btn primary" href="#/login">Log in</a>`;
+    el.innerHTML = `<h2>Trade</h2><p class="muted">Sign in to trade. New members get 1,000 Avenues free.</p>
+      <a class="btn primary" href="${signInHref()}">Sign in</a>`;
     return;
   }
   if (state.user.id === state.detail.market.creatorId) {
@@ -304,12 +314,14 @@ function renderTicket() {
     </div>
     <form data-form="order">
       <div class="two">
-        <label>Limit price (¢)<input name="price" type="number" min="1" max="99" step="1" required value="${t.price ?? ''}"></label>
+        <label>Limit price (%)<input name="price" type="number" min="1" max="99" step="1" required value="${t.price ?? ''}"></label>
         <label>Contracts<input name="qty" type="number" min="1" step="1" required value="${t.qty}"></label>
       </div>
       <p class="muted small">${ask == null
         ? `Nobody is offering ${t.side.toUpperCase()} right now. Your order will wait in the book for a match.`
-        : `Fills right away at ${ask}¢ or higher. A lower price waits in the book.`}</p>
+        : `Fills right away at ${ask}% or higher. A lower price waits in the book.`}</p>
+      <p class="muted small">Each contract pays 1 Avenue if you’re right. Its price is a percentage of that Avenue:
+      at 60%, a contract costs 0.60 Avenues.</p>
       <div class="summary" id="summary"></div>
       <button class="wide ${t.side === 'yes' ? 'buy-yes' : 'buy-no'}">Buy ${t.side.toUpperCase()}</button>
     </form>`;
@@ -336,7 +348,7 @@ function positionPanel(d) {
   if (!p || (!p.yesQty && !p.noQty)) return '';
   const cost = p.yesCost + p.noCost;
   const row = (side, qty, c) =>
-    qty ? `<tr><td class="${side}">${side.toUpperCase()}</td><td class="r num">${qty.toLocaleString()}</td><td class="r num">${(c / qty).toFixed(1)}¢</td><td class="r num">${money(c)}</td></tr>` : '';
+    qty ? `<tr><td class="${side}">${side.toUpperCase()}</td><td class="r num">${qty.toLocaleString()}</td><td class="r num">${(c / qty).toFixed(1)}%</td><td class="r num">${money(c)}</td></tr>` : '';
   let outcome = '';
   if (p.payout != null) {
     const net = p.payout - p.fee - cost;
@@ -355,7 +367,7 @@ function ordersPanel(d) {
   return `<div class="panel"><h2>Your open orders</h2><table>
     ${d.orders.map((o) => `<tr>
       <td class="${o.side}">${o.side.toUpperCase()}</td>
-      <td class="num">${o.remaining.toLocaleString()} @ ${o.price}¢</td>
+      <td class="num">${o.remaining.toLocaleString()} @ ${o.price}%</td>
       <td class="r"><button class="link" data-action="cancel" data-id="${o.id}">Cancel</button></td></tr>`).join('')}
   </table></div>`;
 }
@@ -363,7 +375,7 @@ function ordersPanel(d) {
 // ---------- create ----------
 
 function createPage() {
-  if (!state.user) return (location.hash = '#/login');
+  if (!state.user) return (location.hash = signInHref());
   const d = new Date(Date.now() + 7 * 86_400_000);
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   view.innerHTML = `
@@ -409,7 +421,7 @@ function authPage(mode) {
   view.innerHTML = `
     <form class="panel narrow" data-form="${mode}">
       <h1>${signup ? 'Create your account' : 'Log in'}</h1>
-      <p class="muted">${signup && state.config.demo ? 'New accounts start with $1,000.00 in demo credits.' : '&nbsp;'}</p>
+      <p class="muted">${signup ? 'New accounts get 1,000 Avenues to play with.' : '&nbsp;'}</p>
       <label>Username<input name="username" required autocomplete="username" minlength="3" maxlength="20"></label>
       <label>Password<input name="password" type="password" required minlength="8" autocomplete="${signup ? 'new-password' : 'current-password'}"></label>
       ${signup ? `<label class="check"><input type="checkbox" id="signup-agree" name="agree" required>
@@ -424,7 +436,7 @@ function authPage(mode) {
 // ---------- portfolio ----------
 
 const LEDGER_LABELS = {
-  deposit: 'Deposit',
+  deposit: 'Welcome Avenues',
   order_reserve: 'Order placed',
   order_refund: 'Order cancelled',
   price_improvement: 'Filled at a better price',
@@ -433,7 +445,7 @@ const LEDGER_LABELS = {
 };
 
 async function portfolioPage() {
-  if (!state.user) return (location.hash = '#/login');
+  if (!state.user) return (location.hash = signInHref());
   const { positions, orders, ledger } = await api('/portfolio');
   const live = positions.filter((r) => r.position.payout == null);
   const settled = positions.filter((r) => r.position.payout != null);
@@ -450,7 +462,6 @@ async function portfolioPage() {
       <div class="stat"><span class="muted small">In positions</span><b class="num">${money(inPositions)}</b></div>
       <div class="stat"><span class="muted small">In open orders</span><b class="num">${money(inOrders)}</b></div>
     </div>
-    ${state.config.demo ? '<p><button data-action="faucet">Add $500.00 demo credits</button></p>' : ''}
     <div class="panel scroll"><h2>Positions</h2>
       ${live.length ? `<table><tr><th>Market</th><th>Holding</th><th class="r">Cost</th><th class="r">Status</th></tr>
         ${live.map((r) => `<tr><td><a href="#/m/${r.market.id}">${esc(r.market.question)}</a></td><td>${holding(r.position)}</td>
@@ -460,7 +471,7 @@ async function portfolioPage() {
     <div class="panel scroll"><h2>Open orders</h2>
       ${orders.length ? `<table><tr><th>Market</th><th>Order</th><th class="r">Reserved</th><th></th></tr>
         ${orders.map((o) => `<tr><td><a href="#/m/${o.marketId}">${esc(o.question)}</a></td>
-          <td><span class="${o.side}">${o.side.toUpperCase()}</span> ${o.remaining.toLocaleString()} @ ${o.price}¢</td>
+          <td><span class="${o.side}">${o.side.toUpperCase()}</span> ${o.remaining.toLocaleString()} @ ${o.price}%</td>
           <td class="r num">${money(o.remaining * o.price)}</td>
           <td class="r"><button class="link" data-action="cancel" data-id="${o.id}">Cancel</button></td></tr>`).join('')}</table>`
         : '<div class="muted">No open orders.</div>'}
@@ -493,18 +504,18 @@ async function adminPage() {
   view.innerHTML = `
     <h1>Admin</h1>
     <div class="stats">
-      ${stat(`Fee revenue (${feePct()} of profit)`, money(s.feeRevenue))}
+      ${stat(`Fees kept (${feePct()} of profit)`, money(s.feeRevenue))}
       ${stat('Users', s.users.toLocaleString())}
       ${stat('Markets', s.markets.toLocaleString())}
       ${stat('Contracts traded', s.contractsTraded.toLocaleString())}
     </div>
     <div class="panel"><h2>Where the money is</h2>
       <div class="summary">
-        <div><span class="muted">Customer balances</span><span class="num">${money(s.userBalances)}</span></div>
+        <div><span class="muted">Member balances</span><span class="num">${money(s.userBalances)}</span></div>
         <div><span class="muted">Held for open orders</span><span class="num">${money(s.orderEscrow)}</span></div>
         <div><span class="muted">Held for open positions</span><span class="num">${money(s.positionEscrow)}</span></div>
-        <div><span class="muted">Platform fees earned</span><span class="num">${money(s.feeRevenue)}</span></div>
-        <div class="total"><span>Total deposits</span><span class="num">${money(s.deposits)}</span></div>
+        <div><span class="muted">Fees kept</span><span class="num">${money(s.feeRevenue)}</span></div>
+        <div class="total"><span>Avenues given out</span><span class="num">${money(s.deposits)}</span></div>
       </div>
       <span class="badge ${s.balanced ? 'yes' : 'no'}">${s.balanced ? 'Books balance: every payout is fully funded by traders' : 'Books do not balance'}</span>
     </div>
@@ -547,10 +558,10 @@ function termsPage() {
       <p class="muted">These terms describe the marketplace. They are a starting point, not legal advice.</p>
       <h2>Crowdline is a venue, not a party to your trades</h2>
       <p>Members create markets and trade with each other. Every trade is between two members: one buys YES,
-      the other buys NO, and together their payments fund the $1.00 that each contract pays the winner.
+      the other buys NO, and together their payments fund the 1 Avenue that each contract pays the winner.
       Crowdline never buys or sells contracts, never takes the other side of a trade, and doesn’t set prices.</p>
-      <h2>Our fee</h2>
-      <p>When a market settles, we keep ${feePct()} of each member’s net profit in that market. Net profit is what the
+      <h2>The fee</h2>
+      <p>When a market settles, Crowdline keeps ${feePct()} of each member’s net profit in that market, in Avenues. Net profit is what the
       market paid you minus everything you paid for contracts in it. If you lose or break even, you pay no fee.</p>
       <h2>Who decides the result</h2>
       <p>The member who created a market reports its result, following the rules written in the market.
@@ -561,13 +572,137 @@ function termsPage() {
       <h2>Market rules</h2>
       <p>No markets on anyone’s death, injury or safety; on violence, terrorism, war casualties or crimes; about private
       individuals or anyone under 18; or on anything the creator can decide or influence. Report markets that break these rules.</p>
-      <h2>Your money</h2>
-      <p>When you place an order, its full cost is set aside from your balance until it fills or you cancel it.
-      Money in open positions is held until the market settles. ${state.config.local || state.config.demo
-        ? 'Right now all balances are play money with no cash value: you can’t buy credits or withdraw them.' : ''}</p>
+      <h2>Avenues are play money</h2>
+      <p>Avenues have no cash value. New members get 1,000 Avenues free when they first sign in${state.config.googleClientId ? ' with Google' : ''},
+      once per account. Avenues can’t be bought, sold, withdrawn, transferred or exchanged for prizes. When you place an
+      order, its full cost is set aside from your balance until it fills or you cancel it, and Avenues in open positions
+      are held until the market settles.</p>
+      <h2>How Crowdline makes money</h2>
+      <p>Crowdline shows ads. It never charges members anything. See the <a class="yes" href="#/privacy">privacy page</a>
+      for what the ads and Google sign-in collect.</p>
       <h2>Eligibility and conduct</h2>
       <p>You must be 18 or older. Don’t trade on information you got in confidence, manipulate the event a market
       is about, or use more than one account.</p>
+    </article>`;
+}
+
+// ---------- Google sign-in ----------
+
+function signInHref() {
+  return state.config.googleClientId ? '#/signin' : '#/signup';
+}
+
+const scripts = new Map();
+function loadScript(src) {
+  if (!scripts.has(src)) {
+    scripts.set(src, new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = src;
+      el.async = true;
+      el.crossOrigin = 'anonymous';
+      el.onload = resolve;
+      el.onerror = () => {
+        scripts.delete(src);
+        reject(new Error('blocked'));
+      };
+      document.head.append(el);
+    }));
+  }
+  return scripts.get(src);
+}
+
+async function onGoogleCredential({ credential }) {
+  const agree = document.getElementById('google-agree')?.checked ?? false;
+  try {
+    const { user, isNew } = await api('/google', { method: 'POST', body: { credential, agree } });
+    state.user = user;
+    toast(isNew ? `Welcome! You have ${money(user.balance)} to trade with.` : `Welcome back, ${user.username}`);
+    location.hash = '#/';
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function signInPage() {
+  if (!state.config.googleClientId) return (location.hash = '#/signup');
+  if (state.user) return (location.hash = '#/');
+  view.innerHTML = `
+    <div class="panel narrow signin">
+      <h1>Sign in to Crowdline</h1>
+      <p>New members get <b>1,000 Avenues</b> free, once per Google account. Avenues are play money:
+      they can’t be bought, cashed out or exchanged for prizes.</p>
+      <label class="check"><input type="checkbox" id="google-agree">
+        <span>I am 18 or older and agree to the <a class="yes" href="#/terms" target="_blank">marketplace terms</a>
+        and <a class="yes" href="#/privacy" target="_blank">privacy policy</a>. (Only needed the first time.)</span></label>
+      <div id="google-button" class="google-button"><span class="muted small">Loading Google sign-in…</span></div>
+      <p class="muted small">We keep your Google account ID and a username made from your name. We don’t post anything to your account.</p>
+    </div>`;
+  loadScript('https://accounts.google.com/gsi/client')
+    .then(() => {
+      const holder = document.getElementById('google-button');
+      if (!holder || !window.google?.accounts?.id) return;
+      google.accounts.id.initialize({ client_id: state.config.googleClientId, callback: onGoogleCredential });
+      holder.innerHTML = '';
+      google.accounts.id.renderButton(holder, { theme: 'filled_black', size: 'large', shape: 'pill', text: 'continue_with', width: 280 });
+    })
+    .catch(() => {
+      const holder = document.getElementById('google-button');
+      if (holder) holder.innerHTML = '<p class="no small">Google sign-in couldn’t load. If you use an ad or tracker blocker, allow accounts.google.com and reload.</p>';
+    });
+}
+
+// ---------- ads ----------
+
+function adSlot(name) {
+  const ads = state.config.ads ?? {};
+  const slot = ads.slots?.[name];
+  if (ads.client && slot) {
+    return `<div class="ad ad-${name}"><span class="ad-label">Advertisement</span>
+      <ins class="adsbygoogle" style="display:block" data-ad-client="${esc(ads.client)}" data-ad-slot="${esc(slot)}"
+        data-ad-format="auto" data-full-width-responsive="true"></ins></div>`;
+  }
+  if (!ads.client && ads.showPlaceholders) {
+    return `<div class="ad ad-${name} ad-placeholder"><span class="ad-label">Ad space</span></div>`;
+  }
+  return '';
+}
+
+function fillAds() {
+  const slots = view.querySelectorAll('ins.adsbygoogle:not([data-adsbygoogle-status])');
+  if (!slots.length) return;
+  const client = encodeURIComponent(state.config.ads.client);
+  loadScript(`https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${client}`).catch(() => {});
+  for (let i = 0; i < slots.length; i++) {
+    try {
+      (window.adsbygoogle = window.adsbygoogle || []).push({});
+    } catch {}
+  }
+}
+
+// ---------- privacy ----------
+
+function privacyPage() {
+  view.innerHTML = `
+    <article class="panel terms">
+      <h1>Privacy</h1>
+      <p class="muted">What Crowdline collects and why.</p>
+      <h2>Your account</h2>
+      <p>${state.config.googleClientId
+        ? 'When you sign in with Google, Crowdline receives your Google account ID, name and email address from Google. It keeps only the account ID, to recognise you next time, and a username made from your name. It doesn’t store your email address or get access to anything else in your Google account.'
+        : 'Crowdline stores your username and a scrambled (hashed) copy of your password.'}
+      It also stores the markets you create, your orders, trades, balance, and any reports or disputes you send.
+      Usernames, markets and trades can be seen by other members.</p>
+      ${state.config.local ? `<h2>This copy runs in your browser</h2>
+      <p>On this site, Crowdline runs entirely in your browser. Your account and everything you do is saved in your
+      browser’s storage on this device and isn’t sent to a Crowdline server. Clearing your browser data, or using Reset demo, erases it.</p>` : ''}
+      <h2>Ads</h2>
+      <p>Crowdline pays for itself with ads from Google AdSense. Google and its partners use cookies to show ads and to
+      measure them, and may use them to personalise ads based on your visits to this and other sites. You can turn off
+      personalised ads in <a class="yes" href="https://adssettings.google.com" target="_blank" rel="noopener">Google’s ad settings</a>.
+      Read <a class="yes" href="https://policies.google.com/technologies/partner-sites" target="_blank" rel="noopener">how Google uses
+      information from sites that use its services</a>.</p>
+      <h2>Questions</h2>
+      <p>Open an issue on the project’s <a class="yes" href="https://github.com/ASCoding11/AK47/issues" target="_blank" rel="noopener">GitHub page</a>.</p>
     </article>`;
 }
 
@@ -585,10 +720,13 @@ async function render() {
     else if (hash === '#/portfolio') await portfolioPage();
     else if (hash === '#/admin') await adminPage();
     else if (hash === '#/terms') termsPage();
+    else if (hash === '#/privacy') privacyPage();
+    else if (hash === '#/signin') signInPage();
     else await marketsPage();
   } catch (err) {
     view.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
   }
+  fillAds();
 }
 
 const actions = {
@@ -633,11 +771,6 @@ const actions = {
     await api('/reset-demo', { method: 'POST' });
     location.hash = '#/';
     location.reload();
-  },
-  async faucet() {
-    await api('/faucet', { method: 'POST' });
-    toast('Demo credits added');
-    render();
   },
 };
 

@@ -275,3 +275,84 @@ test('pages demo: example markets are seeded and the visitor becomes admin', asy
   await api.request('POST', '/reset-demo');
   assert.equal((await api.request('GET', '/me')).user, null);
 });
+
+// ---------- Google sign-in ----------
+
+for (const [kind, make] of Object.entries(ENGINES)) {
+  test(`${kind}: Google sign-in grants 1,000 Avenues once per Google account`, async () => {
+    const engine = make(() => Date.now());
+    await assert.throws(() => engine.googleSignIn({ sub: 'g-1', name: 'Ada Lovelace' }), /18 or older/);
+    const first = engine.googleSignIn({ sub: 'g-1', name: 'Ada Lovelace' }, true);
+    assert.equal(first.isNew, true);
+    assert.equal(first.user.username, 'Ada_Lovelace');
+    assert.equal(first.user.balance, 100_000);
+    assert.equal(first.user.isAdmin, true);
+    const again = engine.googleSignIn({ sub: 'g-1', name: 'Ada Lovelace' });
+    assert.equal(again.isNew, false);
+    assert.equal(again.user.id, first.user.id);
+    assert.equal(engine.getUser(first.user.id).balance, 100_000);
+    const twin = engine.googleSignIn({ sub: 'g-2', name: 'Ada Lovelace' }, true);
+    assert.equal(twin.user.username, 'Ada_Lovelace2');
+    assert.equal(twin.user.isAdmin, false);
+    const short = engine.googleSignIn({ sub: 'g-3', email: 'xy@example.com' }, true);
+    assert.equal(short.user.username, 'memberxy');
+    assert.equal(engine.userForToken(short.token).id, short.user.id);
+    await assert.rejects(async () => engine.login('Ada_Lovelace', ''), /Wrong/);
+    assert.equal(engine.stats().balanced, true);
+  });
+}
+
+import { generateKeyPairSync, sign as rsaSign } from 'node:crypto';
+import { createGoogleVerifier } from '../src/google-auth.js';
+
+const b64u = (v) => Buffer.from(typeof v === 'string' ? v : JSON.stringify(v)).toString('base64url');
+
+function fakeGoogle() {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'k1', alg: 'RS256', use: 'sig' };
+  let fetches = 0;
+  const fetchImpl = async () => {
+    fetches++;
+    return { ok: true, json: async () => ({ keys: [jwk] }) };
+  };
+  const token = (claims, { kid = 'k1', key = privateKey } = {}) => {
+    const head = b64u({ alg: 'RS256', kid, typ: 'JWT' });
+    const body = b64u(claims);
+    return `${head}.${body}.${rsaSign('RSA-SHA256', Buffer.from(`${head}.${body}`), key).toString('base64url')}`;
+  };
+  return { fetchImpl, token, fetches: () => fetches };
+}
+
+test('server: Google ID tokens are verified against Google keys', async () => {
+  const g = fakeGoogle();
+  const t0 = Date.now();
+  const verify = createGoogleVerifier({ clientId: 'my-app', fetchImpl: g.fetchImpl, now: () => t0 });
+  const good = { iss: 'https://accounts.google.com', aud: 'my-app', sub: '42', name: 'Ada', exp: t0 / 1000 + 600 };
+  assert.equal((await verify(g.token(good))).sub, '42');
+  await verify(g.token(good));
+  assert.equal(g.fetches(), 1, 'keys are cached');
+  await assert.rejects(verify(g.token({ ...good, aud: 'other-app' })), /Invalid/);
+  await assert.rejects(verify(g.token({ ...good, iss: 'evil.example' })), /Invalid/);
+  await assert.rejects(verify(g.token({ ...good, exp: t0 / 1000 - 1 })), /expired/);
+  const other = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+  await assert.rejects(verify(g.token(good, { key: other })), /Invalid/);
+  await assert.rejects(verify(g.token(good, { kid: 'unknown' })), /Invalid/);
+  await assert.rejects(verify('not.a.jwt'), /Invalid/);
+  await assert.rejects(createGoogleVerifier({ clientId: '' })('x.y.z'), /not set up/);
+});
+
+test('pages demo: Google sign-in replaces password signup once configured', async () => {
+  const config = { googleClientId: 'my-app', ads: { client: '', slots: {}, showPlaceholders: false } };
+  const api = createLocalApi({ storage: memoryStorage(), config });
+  assert.equal((await api.request('GET', '/config')).googleClientId, 'my-app');
+  await assert.rejects(api.request('POST', '/register', { username: 'pw_user', password: 'password1', agree: 'on' }), /Sign in with Google/);
+  const exp = Math.floor(Date.now() / 1000) + 600;
+  const cred = `${b64u({ alg: 'RS256' })}.${b64u({ aud: 'my-app', sub: 'g-9', name: 'Grace Hopper', exp })}.sig`;
+  await assert.rejects(api.request('POST', '/google', { credential: cred }), /18 or older/);
+  const { user, isNew } = await api.request('POST', '/google', { credential: cred, agree: 'on' });
+  assert.equal(isNew, true);
+  assert.equal(user.balance, 100_000);
+  assert.equal((await api.request('GET', '/me')).user.username, 'Grace_Hopper');
+  const wrongAud = `${b64u({ alg: 'RS256' })}.${b64u({ aud: 'someone-else', sub: 'g-9', exp })}.sig`;
+  await assert.rejects(api.request('POST', '/google', { credential: wrongAud }), /Invalid/);
+});
