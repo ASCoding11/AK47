@@ -288,7 +288,7 @@ for (const [kind, make] of Object.entries(ENGINES)) {
 }
 
 import { generateKeyPairSync, sign as rsaSign } from 'node:crypto';
-import { createGoogleVerifier } from '../src/google-auth.js';
+import { createFirebaseVerifier, createGoogleVerifier } from '../src/google-auth.js';
 
 const b64u = (v) => Buffer.from(typeof v === 'string' ? v : JSON.stringify(v)).toString('base64url');
 
@@ -339,4 +339,36 @@ test('pages demo: Google sign-in replaces password signup once configured', asyn
   assert.equal((await api.request('GET', '/me')).user.username, 'Grace_Hopper');
   const wrongAud = `${b64u({ alg: 'RS256' })}.${b64u({ aud: 'someone-else', sub: 'g-9', exp })}.sig`;
   await assert.rejects(api.request('POST', '/google', { credential: wrongAud }), /Invalid/);
+});
+
+test('server: Firebase ID tokens are verified against the project', async () => {
+  const g = fakeGoogle();
+  const t0 = Date.now();
+  const verify = createFirebaseVerifier({ projectId: 'crowdline-123', fetchImpl: g.fetchImpl, now: () => t0 });
+  const good = { iss: 'https://securetoken.google.com/crowdline-123', aud: 'crowdline-123', sub: 'uid-7', name: 'Ada', exp: t0 / 1000 + 600 };
+  assert.equal((await verify(g.token(good))).sub, 'uid-7');
+  await assert.rejects(verify(g.token({ ...good, aud: 'other-project' })), /Invalid/);
+  await assert.rejects(verify(g.token({ ...good, iss: 'https://securetoken.google.com/other-project' })), /Invalid/);
+  await assert.rejects(verify(g.token({ ...good, iss: 'https://accounts.google.com' })), /Invalid/);
+});
+
+test('pages demo: Firebase sign-in takes precedence when configured', async () => {
+  const config = {
+    googleClientId: '',
+    firebase: { apiKey: 'AIza-test', authDomain: 'crowdline-123.firebaseapp.com', projectId: 'crowdline-123', appId: '1:2:web:3' },
+    ads: { client: '', slots: {}, showPlaceholders: false },
+  };
+  const api = createLocalApi({ storage: memoryStorage(), config });
+  const cfg = await api.request('GET', '/config');
+  assert.equal(cfg.signIn, 'firebase');
+  assert.equal(cfg.firebase.projectId, 'crowdline-123');
+  await assert.rejects(api.request('POST', '/register', { username: 'pw_user', password: 'password1' }), /Sign in with Google/);
+  const exp = Math.floor(Date.now() / 1000) + 600;
+  const tok = (claims) => `${b64u({ alg: 'RS256' })}.${b64u(claims)}.sig`;
+  const good = { iss: 'https://securetoken.google.com/crowdline-123', aud: 'crowdline-123', sub: 'uid-1', name: 'Linus T', exp };
+  await assert.rejects(api.request('POST', '/google', { credential: tok({ ...good, iss: 'https://accounts.google.com' }) }), /Invalid/);
+  const { user, isNew } = await api.request('POST', '/google', { credential: tok(good) });
+  assert.equal(isNew, true);
+  assert.equal(user.username, 'Linus_T');
+  assert.equal(user.balance, 100_000);
 });

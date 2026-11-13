@@ -31,7 +31,18 @@ it pays out and can void markets that break the rules.
 Both are configured in `src/site-config.js`. After editing it, run
 `npm run build:pages` and commit, so the GitHub Pages copy picks it up.
 
-**Google sign-in**
+**Google sign-in with Firebase** (used instead of the option below when set)
+
+1. In the [Firebase console](https://console.firebase.google.com/), open your
+   project, go to **Authentication → Sign-in method**, and enable **Google**.
+2. Under **Authentication → Settings → Authorized domains**, add
+   `ascoding11.github.io` (and your Render address if you use one; `localhost`
+   is there already).
+3. Under **Project settings → General → Your apps**, add a **Web app** if there
+   isn't one, and copy `apiKey`, `authDomain`, `projectId` and `appId` from its
+   config into `firebase` in `src/site-config.js`. These values aren't secret.
+
+**Google sign-in without Firebase**
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create a
    project, then open **APIs & Services → OAuth consent screen**, choose

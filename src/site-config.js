@@ -7,6 +7,18 @@ export const SITE_CONFIG = {
   // back to username/password accounts so it stays usable.
   googleClientId: '',
 
+  // Firebase Authentication (an alternative to googleClientId; used instead of
+  // it when filled in). Copy these from Firebase console → Project settings →
+  // General → Your apps → SDK setup and configuration → Config. Turn on Google
+  // under Authentication → Sign-in method, and add the site's domain (e.g.
+  // ascoding11.github.io) under Authentication → Settings → Authorized domains.
+  firebase: {
+    apiKey: '',
+    authDomain: '',
+    projectId: '',
+    appId: '',
+  },
+
   // Google AdSense. `client` is your publisher ID, e.g. 'ca-pub-1234567890123456'.
   // Each slot is the numeric ID of a display ad unit you create in AdSense.
   ads: {
@@ -20,3 +32,11 @@ export const SITE_CONFIG = {
     showPlaceholders: true,
   },
 };
+
+// Which sign-in the site uses: 'firebase', 'google' (plain Google Identity
+// Services), or 'password' when neither is configured.
+export function signInMode(config = SITE_CONFIG) {
+  if (config.firebase?.apiKey && config.firebase?.projectId) return 'firebase';
+  if (config.googleClientId) return 'google';
+  return 'password';
+}

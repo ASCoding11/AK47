@@ -59,7 +59,7 @@ function renderNav() {
       ? `<span class="balance num" title="Available balance">${money(u.balance)}</span>
          <span class="muted">${esc(u.username)}</span>
          <button class="link" data-action="logout">Log out</button>`
-      : state.config.googleClientId
+      : googleSignIn()
         ? `<a class="btn primary" href="#/signin">Sign in · 1,000 free Avenues</a>`
         : `${link('#/login', 'Log in')}<a class="btn primary" href="#/signup">Sign up</a>`}`;
 }
@@ -101,7 +101,7 @@ async function marketsPage() {
       <h1>Trade on what happens next</h1>
       <p>Crowdline is a play-money prediction marketplace. Members create markets, trade with each other in Avenues,
       and each market’s creator reports the result. Every contract pays 1 Avenue to the side that is right.
-      ${state.user ? '' : `<a class="yes" href="${signInHref()}">Sign in${state.config.googleClientId ? ' with Google' : ''}</a> and get 1,000 Avenues free.`}
+      ${state.user ? '' : `<a class="yes" href="${signInHref()}">Sign in${googleSignIn() ? ' with Google' : ''}</a> and get 1,000 Avenues free.`}
       Avenues have no cash value. <a class="yes" href="#/terms">How it works</a></p>
     </div>
     ${adSlot('marketsTop')}
@@ -537,7 +537,7 @@ function termsPage() {
       <p>No markets on anyone’s death, injury or safety; on violence, terrorism, war casualties or crimes; about private
       individuals; or on anything the creator can decide or influence. Report markets that break these rules.</p>
       <h2>Avenues are play money</h2>
-      <p>Avenues have no cash value. New members get 1,000 Avenues free when they first sign in${state.config.googleClientId ? ' with Google' : ''},
+      <p>Avenues have no cash value. New members get 1,000 Avenues free when they first sign in${googleSignIn() ? ' with Google' : ''},
       once per account. Avenues can’t be bought, sold, withdrawn, transferred or exchanged for prizes. When you place an
       order, its full cost is set aside from your balance until it fills or you cancel it, and Avenues in open positions
       are held until the market settles.</p>
@@ -552,8 +552,11 @@ function termsPage() {
 
 // ---------- Google sign-in ----------
 
+// 'firebase', 'google' or 'password' (no Google sign-in configured yet).
+const googleSignIn = () => (state.config.signIn ?? (state.config.googleClientId ? 'google' : 'password')) !== 'password';
+
 function signInHref() {
-  return state.config.googleClientId ? '#/signin' : '#/signup';
+  return googleSignIn() ? '#/signin' : '#/signup';
 }
 
 const scripts = new Map();
@@ -587,7 +590,7 @@ async function onGoogleCredential({ credential }) {
 }
 
 function signInPage() {
-  if (!state.config.googleClientId) return (location.hash = '#/signup');
+  if (!googleSignIn()) return (location.hash = '#/signup');
   if (state.user) return (location.hash = '#/');
   view.innerHTML = `
     <div class="panel narrow signin">
@@ -599,6 +602,7 @@ function signInPage() {
       <a class="yes" href="#/privacy">privacy policy</a>. We keep your Google account ID and a username made from your name,
       and we don’t post anything to your account.</p>
     </div>`;
+  if (state.config.signIn === 'firebase') return renderFirebaseButton();
   loadScript('https://accounts.google.com/gsi/client')
     .then(() => {
       const holder = document.getElementById('google-button');
@@ -611,6 +615,77 @@ function signInPage() {
       const holder = document.getElementById('google-button');
       if (holder) holder.innerHTML = '<p class="no small">Google sign-in couldn’t load. If you use an ad or tracker blocker, allow accounts.google.com and reload.</p>';
     });
+}
+
+// Firebase Authentication: Google's sign-in popup, then the Firebase ID token
+// is exchanged for a Crowdline session. Firebase's own session is signed out
+// straight away, since Crowdline keeps its own.
+const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
+let firebaseAuth;
+
+async function loadFirebaseAuth() {
+  if (!firebaseAuth) {
+    firebaseAuth = (async () => {
+      const [{ initializeApp }, auth] = await Promise.all([
+        import(`${FIREBASE_SDK}/firebase-app.js`),
+        import(`${FIREBASE_SDK}/firebase-auth.js`),
+      ]);
+      const app = initializeApp(state.config.firebase);
+      return { auth, instance: auth.getAuth(app) };
+    })().catch((err) => {
+      firebaseAuth = null;
+      throw err;
+    });
+  }
+  return firebaseAuth;
+}
+
+const FIREBASE_ERRORS = {
+  'auth/popup-blocked': 'Your browser blocked the Google sign-in window. Allow pop-ups for this site and try again.',
+  'auth/unauthorized-domain': 'This site’s address isn’t on the Firebase project’s list of authorized domains yet.',
+  'auth/operation-not-allowed': 'Google sign-in isn’t turned on in the Firebase project yet.',
+  'auth/network-request-failed': 'Couldn’t reach Google. Check your connection and try again.',
+};
+
+function renderFirebaseButton() {
+  const holder = document.getElementById('google-button');
+  holder.innerHTML = `<button class="google-continue" data-action="firebaseSignIn">
+    <svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true">
+      <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.9 6.1C12.5 13.6 17.8 9.5 24 9.5z"/>
+      <path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.7 6c4.5-4.2 6.9-10.3 6.9-17.7z"/>
+      <path fill="#FBBC05" d="M10.6 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-7.9-6.1C1 16.6 0 20.2 0 24s1 7.4 2.7 10.7l7.9-6.1z"/>
+      <path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.7-6c-2.2 1.5-5 2.3-8.2 2.3-6.2 0-11.5-4.1-13.4-9.8l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/>
+    </svg>
+    Continue with Google</button>`;
+  // Start loading the SDK now so the popup opens straight from the click.
+  loadFirebaseAuth().catch(() => {});
+}
+
+async function firebaseSignIn(button) {
+  button.disabled = true;
+  try {
+    let loaded;
+    try {
+      loaded = await loadFirebaseAuth();
+    } catch {
+      throw new Error('Google sign-in couldn’t load. If you use an ad or tracker blocker, allow gstatic.com and reload.');
+    }
+    const { auth, instance } = loaded;
+    let result;
+    try {
+      result = await auth.signInWithPopup(instance, new auth.GoogleAuthProvider());
+    } catch (err) {
+      if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') return;
+      throw new Error(FIREBASE_ERRORS[err.code] ?? 'Google sign-in didn’t work. Try again.');
+    }
+    const credential = await result.user.getIdToken();
+    auth.signOut(instance).catch(() => {});
+    await onGoogleCredential({ credential });
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ---------- ads ----------
@@ -649,7 +724,7 @@ function privacyPage() {
       <h1>Privacy</h1>
       <p class="muted">What Crowdline collects and why.</p>
       <h2>Your account</h2>
-      <p>${state.config.googleClientId
+      <p>${googleSignIn()
         ? 'When you sign in with Google, Crowdline receives your Google account ID, name and email address from Google. It keeps only the account ID, to recognise you next time, and a username made from your name. It doesn’t store your email address or get access to anything else in your Google account.'
         : 'Crowdline stores your username and a scrambled (hashed) copy of your password.'}
       It also stores the markets you create, your orders, trades, balance, and any reports you send.
@@ -692,6 +767,9 @@ async function render() {
 }
 
 const actions = {
+  firebaseSignIn(el) {
+    return firebaseSignIn(el);
+  },
   async logout() {
     await api('/logout', { method: 'POST' });
     state.user = null;

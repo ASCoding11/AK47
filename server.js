@@ -3,8 +3,8 @@ import { readFile, mkdir } from 'node:fs/promises';
 import { dirname, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ApiError, CATEGORIES, createEngine } from './src/engine.js';
-import { createGoogleVerifier } from './src/google-auth.js';
-import { SITE_CONFIG } from './src/site-config.js';
+import { createFirebaseVerifier, createGoogleVerifier } from './src/google-auth.js';
+import { SITE_CONFIG, signInMode } from './src/site-config.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(ROOT, 'public');
@@ -16,7 +16,10 @@ const ADS = { ...SITE_CONFIG.ads, client: process.env.ADSENSE_CLIENT ?? SITE_CON
 
 await mkdir(dirname(DB_PATH), { recursive: true });
 const engine = createEngine(DB_PATH);
-const verifyGoogleToken = createGoogleVerifier({ clientId: GOOGLE_CLIENT_ID });
+const SIGN_IN = signInMode({ ...SITE_CONFIG, googleClientId: GOOGLE_CLIENT_ID });
+const verifyGoogleToken = SIGN_IN === 'firebase'
+  ? createFirebaseVerifier({ projectId: SITE_CONFIG.firebase.projectId })
+  : createGoogleVerifier({ clientId: GOOGLE_CLIENT_ID });
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -59,7 +62,9 @@ const routes = [];
 const route = (method, pattern, handler, { auth = false } = {}) =>
   routes.push({ method, re: new RegExp(`^${pattern.replace(/:id/g, '(\\d+)')}$`), handler, auth });
 
-route('GET', '/api/config', () => ({ categories: CATEGORIES, googleClientId: GOOGLE_CLIENT_ID, ads: ADS }));
+route('GET', '/api/config', () => ({
+  categories: CATEGORIES, signIn: SIGN_IN, googleClientId: GOOGLE_CLIENT_ID, firebase: SITE_CONFIG.firebase, ads: ADS,
+}));
 route('GET', '/api/me', ({ user }) => ({ user }));
 route('POST', '/api/google', async ({ body, res }) => {
   const claims = await verifyGoogleToken(body.credential);
@@ -69,7 +74,7 @@ route('POST', '/api/google', async ({ body, res }) => {
 });
 route('POST', '/api/register', ({ body, res }) => {
   // With Google sign-in configured, new accounts come only from Google.
-  if (GOOGLE_CLIENT_ID) throw new ApiError(403, 'Sign in with Google to create an account');
+  if (SIGN_IN !== 'password') throw new ApiError(403, 'Sign in with Google to create an account');
   const { user, token } = engine.register(body.username, body.password);
   res.setHeader('Set-Cookie', sessionCookie(token));
   return { user };
@@ -162,5 +167,5 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Crowdline running at http://localhost:${PORT}${GOOGLE_CLIENT_ID ? '' : ' (Google sign-in not configured)'}`);
+  console.log(`Crowdline running at http://localhost:${PORT}${SIGN_IN === 'password' ? ' (Google sign-in not configured)' : ` (sign-in: ${SIGN_IN})`}`);
 });
