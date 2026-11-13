@@ -13,10 +13,12 @@ export const SITE_CONFIG = {
   // under Authentication → Sign-in method, and add the site's domain (e.g.
   // ascoding11.github.io) under Authentication → Settings → Authorized domains.
   firebase: {
-    apiKey: '',
-    authDomain: '',
-    projectId: '',
-    appId: '',
+    apiKey: 'AIzaSyBo1mso8mS2sCSsjUQWwNxQ7qh_RrHysTA',
+    authDomain: 'crowdline-243a7.firebaseapp.com',
+    projectId: 'crowdline-243a7',
+    storageBucket: 'crowdline-243a7.firebasestorage.app',
+    messagingSenderId: '488845118165',
+    appId: '1:488845118165:web:b6c82c9082d056159ef05c',
   },
 
   // Google AdSense. `client` is your publisher ID, e.g. 'ca-pub-1234567890123456'.
