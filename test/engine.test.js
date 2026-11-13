@@ -242,7 +242,9 @@ test('browser: a failed order changes nothing', async () => {
 });
 
 test('pages demo: example markets are seeded and the visitor becomes admin', async () => {
-  const api = createLocalApi({ storage: memoryStorage() });
+  // Password accounts: the mode the site uses when no Google sign-in is configured.
+  const config = { googleClientId: '', firebase: {}, ads: { client: '', slots: {}, showPlaceholders: false } };
+  const api = createLocalApi({ storage: memoryStorage(), config });
   const { markets } = await api.request('GET', '/markets?status=open');
   assert.equal(markets.length, 6);
   assert.ok(markets.every((m) => m.volume > 0 && m.yesBid != null && m.yesAsk != null && m.yesBid < m.yesAsk));
