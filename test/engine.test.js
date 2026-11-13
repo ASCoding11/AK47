@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEngine as createSqlEngine, DISPUTE_WINDOW_MS } from '../src/engine.js';
+import { createEngine as createSqlEngine } from '../src/engine.js';
 import { createEngine as createLocalEngine, memoryStorage } from '../src/local-engine.js';
 import { createLocalApi } from '../src/local-api.js';
 
@@ -151,9 +151,11 @@ test(`${kind}: money is conserved through random trading and settlement`, async 
   assert.equal(s.deposits, s.userBalances + s.feeRevenue);
 });
 
-test(`${kind}: creators cannot trade their own market`, async () => {
-  const { engine, maker, market } = await setup();
-  assert.throws(() => engine.placeOrder(maker.id, market.id, { side: 'yes', price: 50, qty: 1 }), /created this market/);
+test(`${kind}: creators can trade in their own market`, async () => {
+  const { engine, alice, maker, market } = await setup();
+  engine.placeOrder(maker.id, market.id, { side: 'yes', price: 50, qty: 4 });
+  const r = engine.placeOrder(alice.id, market.id, { side: 'no', price: 50, qty: 4 });
+  assert.equal(r.filled, 4);
 });
 
 test(`${kind}: anyone can sign up, with no age check`, async () => {
@@ -161,49 +163,35 @@ test(`${kind}: anyone can sign up, with no age check`, async () => {
   assert.equal((await engine.register('newbie', 'password1')).user.balance, 100_000);
 });
 
-test(`${kind}: creator's result pays out after the dispute window`, async () => {
-  const { engine, alice, bob, maker, market, balance, advance } = await setup();
-  engine.placeOrder(alice.id, market.id, { side: 'yes', price: 60, qty: 10 });
-  engine.placeOrder(bob.id, market.id, { side: 'no', price: 40, qty: 10 });
-  engine.placeOrder(alice.id, market.id, { side: 'yes', price: 30, qty: 5 }); // resting
-  assert.throws(() => engine.proposeResolution(alice.id, market.id, 'yes'), /Only the market/);
-  engine.proposeResolution(maker.id, market.id, 'yes');
-  // Trading stops and the resting order is refunded.
-  assert.equal(engine.getMarket(market.id).status, 'proposed');
-  assert.equal(balance(alice), 100_000 - 600);
-  assert.throws(() => engine.placeOrder(bob.id, market.id, { side: 'no', price: 50, qty: 1 }), /closed/);
-  assert.throws(() => engine.proposeResolution(maker.id, market.id, 'no'), /already been reported/);
-  // Nothing pays out inside the window.
-  advance(DISPUTE_WINDOW_MS - 1000);
-  engine.listMarkets();
-  assert.equal(engine.getMarket(market.id).status, 'proposed');
-  advance(1000);
-  engine.listMarkets();
-  assert.equal(engine.getMarket(market.id).status, 'resolved');
-  assert.equal(balance(alice), 100_000 + 400);
-  assert.equal(engine.stats().balanced, true);
-  assert.throws(() => engine.disputeResolution(bob.id, market.id, 'Too late to complain now'), /no longer/);
-});
-
-test(`${kind}: a disputed result waits for an admin`, async () => {
+test(`${kind}: a reported result pays out only after an admin verifies it`, async () => {
   const { engine, admin, alice, bob, maker, market, balance, advance } = await setup();
   engine.placeOrder(alice.id, market.id, { side: 'yes', price: 60, qty: 10 });
   engine.placeOrder(bob.id, market.id, { side: 'no', price: 40, qty: 10 });
-  engine.proposeResolution(maker.id, market.id, 'yes');
-  const outsider = (await engine.register('outsider', 'password1')).user;
-  assert.throws(() => engine.disputeResolution(outsider.id, market.id, 'I just disagree with it'), /Only traders/);
-  assert.throws(() => engine.disputeResolution(bob.id, market.id, 'short'), /10-1000/);
-  engine.disputeResolution(bob.id, market.id, 'It did not rain at SEA per the NWS daily report.');
-  advance(2 * DISPUTE_WINDOW_MS);
+  engine.placeOrder(alice.id, market.id, { side: 'yes', price: 30, qty: 5 }); // resting
+  assert.throws(() => engine.proposeResolution(alice.id, market.id, 'yes', 'NWS daily report'), /Only the market/);
+  assert.throws(() => engine.proposeResolution(maker.id, market.id, 'yes', ''), /source/);
+  engine.proposeResolution(maker.id, market.id, 'yes', 'NWS daily climate report for SEA');
+  // Trading stops and the resting order is refunded.
+  const reported = engine.getMarket(market.id);
+  assert.equal(reported.status, 'proposed');
+  assert.equal(reported.proposedOutcome, 'yes');
+  assert.match(reported.reportNote, /NWS/);
+  assert.equal(balance(alice), 100_000 - 600);
+  assert.throws(() => engine.placeOrder(bob.id, market.id, { side: 'no', price: 50, qty: 1 }), /closed/);
+  assert.throws(() => engine.proposeResolution(maker.id, market.id, 'no', 'changed my mind'), /already been reported/);
+  // Nothing pays out on its own, however long it waits.
+  advance(30 * DAY);
   engine.listMarkets();
-  const m = engine.getMarket(market.id);
-  assert.equal(m.status, 'disputed');
-  assert.match(m.disputeReason, /NWS/);
-  assert.equal(engine.stats().disputed.length, 1);
+  assert.equal(engine.getMarket(market.id).status, 'proposed');
+  assert.equal(engine.stats().proposed.length, 1);
   assert.equal(engine.stats().balanced, true);
+  // The admin verifies, and can overrule the report.
+  assert.throws(() => engine.resolveMarket(maker.id, market.id, 'yes'), /admin/);
   engine.resolveMarket(admin.id, market.id, 'no');
+  assert.equal(engine.getMarket(market.id).outcome, 'no');
   assert.equal(balance(bob), 100_000 + 600);
-  assert.equal(engine.stats().disputed.length, 0);
+  assert.equal(engine.stats().proposed.length, 0);
+  assert.equal(engine.stats().balanced, true);
 });
 
 test(`${kind}: users can report a market to admins`, async () => {

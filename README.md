@@ -2,7 +2,7 @@
 
 A play-money prediction marketplace. Members create yes-or-no markets, trade
 against each other in **Avenues** (play money with no cash value), and each
-market's creator reports its result. New members get **1,000 Avenues free**
+market's creator reports its result, which Crowdline verifies. New members get **1,000 Avenues free**
 when they first sign in with Google, once per Google account. The site makes
 money from ads; members never pay anything.
 
@@ -15,8 +15,8 @@ npm start        # http://localhost:3000
 npm test
 ```
 
-The **first account created is the admin**, who settles disputed results and
-can void markets that break the rules.
+The **first account created is the admin**, who verifies every result before
+it pays out and can void markets that break the rules.
 
 | Variable          | Default             | Purpose                                                  |
 | ----------------- | ------------------- | -------------------------------------------------------- |
@@ -75,9 +75,11 @@ Set `ads.showPlaceholders` to `false` to hide them.
   together fund the payout. The platform never takes a side.
 - The full cost of an order leaves the buyer's balance when it is placed.
   Cancelling returns whatever has not been filled.
-- A market's **creator reports the result**, and can't trade in their own
-  market. Reporting stops trading. Traders then have 24 hours to dispute; an
-  undisputed result pays out automatically, and a disputed one waits for an admin.
+- Anyone can trade in any market, including the one they created. When the
+  event happens, the creator **reports the result with a source**, which stops
+  trading. Nothing pays out until an admin **verifies** it: the admin confirms
+  the report or settles the market differently. Admins can also settle a market
+  directly, without a report.
 - At settlement every winning contract pays its holder 1 Avenue in full; there
   is no fee. A voided market returns every stake. There is no age requirement:
   it's a free game with no real money.

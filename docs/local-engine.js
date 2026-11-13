@@ -11,7 +11,6 @@
 //     The platform never takes a position.
 //   * At settlement each winning contract pays its holder in full; there is no fee.
 
-export const DISPUTE_WINDOW_MS = 24 * 3_600_000; // traders' time to dispute a creator's result
 export const CATEGORIES = ['Politics', 'Sports', 'Economics', 'Tech', 'Culture', 'Science', 'Other'];
 // Balances are play money ("Avenues") in hundredths: 100 units = 1 Avenue.
 export const WELCOME_BONUS = 100_000; // 1,000 Avenues, once per account
@@ -213,8 +212,8 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
       createdAt: m.created_at,
       resolvedAt: m.resolved_at,
       proposedOutcome: m.proposed_outcome ?? null,
-      finalizesAt: m.proposed_at == null ? null : m.proposed_at + DISPUTE_WINDOW_MS,
-      disputeReason: m.dispute_reason ?? null,
+      reportedAt: m.proposed_at ?? null,
+      reportNote: m.proposed_note ?? null,
     };
   }
 
@@ -261,7 +260,6 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   };
 
   function listMarkets({ status = 'open', category, search } = {}) {
-    finalizeDue();
     const t = now();
     const needle = search ? String(search).slice(0, 100).toLowerCase() : '';
     return s.markets
@@ -289,7 +287,6 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   }
 
   function marketDetail(id, userId) {
-    finalizeDue();
     const market = getMarket(id);
     const level = (side) => {
       const byPrice = new Map();
@@ -339,9 +336,6 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
     return tx(() => {
       const market = getMarket(marketId);
       if (market.status !== 'open') throw new ApiError(400, 'This market is closed for trading');
-      if (market.creatorId === userId) {
-        throw new ApiError(403, 'You created this market, so you can’t trade in it');
-      }
       if (getUser(userId).balance < price * qty) throw new ApiError(400, 'Not enough balance');
       adjust(userId, -price * qty, 'order_reserve', marketId);
 
@@ -416,10 +410,12 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
 
   const OUTCOMES = ['yes', 'no', 'void'];
 
-  // The market's creator reports the result; traders then have
-  // DISPUTE_WINDOW_MS to dispute before it pays out.
-  function proposeResolution(userId, marketId, outcome) {
+  // The market's creator reports what happened, with a source. Trading stops,
+  // and nothing pays out until an admin verifies the result.
+  function proposeResolution(userId, marketId, outcome, note) {
     if (!OUTCOMES.includes(outcome)) throw new ApiError(400, 'Invalid outcome');
+    note = String(note ?? '').trim();
+    if (note.length < 5 || note.length > 1000) throw new ApiError(400, 'Add the source for the result (5-1000 characters)');
     return tx(() => {
       const m = marketRow(marketId);
       if (!m) throw new ApiError(404, 'Market not found');
@@ -429,38 +425,12 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
       m.status = 'proposed';
       m.proposed_outcome = outcome;
       m.proposed_at = now();
+      m.proposed_note = note;
       return { market: marketView(m) };
     });
   }
 
-  function disputeResolution(userId, marketId, reason) {
-    reason = String(reason ?? '').trim();
-    if (reason.length < 10 || reason.length > 1000) {
-      throw new ApiError(400, 'Explain the dispute in 10-1000 characters');
-    }
-    return tx(() => {
-      const m = marketRow(marketId);
-      if (!m) throw new ApiError(404, 'Market not found');
-      if (m.status !== 'proposed' || now() >= m.proposed_at + DISPUTE_WINDOW_MS) {
-        throw new ApiError(400, 'This result can no longer be disputed');
-      }
-      const p = s.positions[`${marketId}:${userId}`];
-      if (!p || p.yes_qty + p.no_qty === 0) throw new ApiError(403, 'Only traders in this market can dispute');
-      m.status = 'disputed';
-      m.dispute_reason = reason;
-      m.disputed_by = userId;
-      return { market: marketView(m) };
-    });
-  }
-
-  function finalizeDue() {
-    for (const m of s.markets) {
-      if (m.status === 'proposed' && m.proposed_at + DISPUTE_WINDOW_MS <= now()) {
-        tx(() => settle(marketRow(m.id), m.proposed_outcome));
-      }
-    }
-  }
-
+  // Admin verification: the only way a market pays out.
   function resolveMarket(adminId, marketId, outcome) {
     if (!OUTCOMES.includes(outcome)) throw new ApiError(400, 'Invalid outcome');
     return tx(() => {
@@ -485,7 +455,6 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   // ---------- reporting ----------
 
   function portfolio(userId) {
-    finalizeDue();
     const positions = Object.values(s.positions)
       .filter((p) => p.user_id === userId)
       .sort((a, b) => b.market_id - a.market_id)
@@ -506,7 +475,6 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   }
 
   function stats() {
-    finalizeDue();
     const sum = (rows, f) => rows.reduce((n, r) => n + f(r), 0);
     const openMarkets = new Set(s.markets.filter((m) => !['resolved', 'voided'].includes(m.status)).map((m) => m.id));
     const st = {
@@ -525,8 +493,7 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
       .filter((m) => m.status === 'open' && m.closes_at <= now())
       .sort((a, b) => a.closes_at - b.closes_at)
       .map(marketView);
-    st.disputed = s.markets.filter((m) => m.status === 'disputed').map(marketView);
-    st.proposed = s.markets.filter((m) => m.status === 'proposed').sort((a, b) => a.proposed_at - b.proposed_at).map(marketView);
+    st.proposed = s.markets.filter((m) => m.status === 'proposed' || m.status === 'disputed').sort((a, b) => a.proposed_at - b.proposed_at).map(marketView);
     st.reports = s.reports
       .filter((r) => !['resolved', 'voided'].includes(marketRow(r.market_id).status))
       .sort((a, b) => b.created_at - a.created_at)
@@ -542,7 +509,7 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   return {
     demo, register, googleSignIn, login, logout, userForToken, getUser, createExampleUser,
     createMarket, getMarket, listMarkets, marketDetail,
-    placeOrder, cancelOrder, proposeResolution, disputeResolution, resolveMarket, reportMarket,
+    placeOrder, cancelOrder, proposeResolution, resolveMarket, reportMarket,
     portfolio, stats, isEmpty,
   };
 }

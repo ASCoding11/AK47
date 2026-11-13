@@ -9,7 +9,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
-export const DISPUTE_WINDOW_MS = 24 * 3_600_000; // traders' time to dispute a creator's result
 export const CATEGORIES = ['Politics', 'Sports', 'Economics', 'Tech', 'Culture', 'Science', 'Other'];
 // Balances are play money ("Avenues") in hundredths: 100 units = 1 Avenue,
 // and every contract pays 1 Avenue to the winning side.
@@ -44,7 +43,7 @@ CREATE TABLE IF NOT EXISTS markets (
   description TEXT NOT NULL DEFAULT '',
   category TEXT NOT NULL,
   closes_at INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'open',   -- open | proposed | disputed | resolved | voided
+  status TEXT NOT NULL DEFAULT 'open',   -- open | proposed (result reported, awaiting verification) | resolved | voided
   outcome TEXT,                          -- yes | no
   last_price INTEGER,                    -- last traded YES price
   volume INTEGER NOT NULL DEFAULT 0,     -- contracts traded
@@ -110,6 +109,7 @@ const MIGRATIONS = [
   'ALTER TABLE markets ADD COLUMN dispute_reason TEXT',
   'ALTER TABLE markets ADD COLUMN disputed_by INTEGER',
   'ALTER TABLE users ADD COLUMN google_sub TEXT',
+  'ALTER TABLE markets ADD COLUMN proposed_note TEXT',
 ];
 
 function hashPassword(password) {
@@ -262,8 +262,8 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
       createdAt: m.created_at,
       resolvedAt: m.resolved_at,
       proposedOutcome: m.proposed_outcome ?? null,
-      finalizesAt: m.proposed_at == null ? null : m.proposed_at + DISPUTE_WINDOW_MS,
-      disputeReason: m.dispute_reason ?? null,
+      reportedAt: m.proposed_at ?? null,
+      reportNote: m.proposed_note ?? null,
     };
   }
 
@@ -301,7 +301,6 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   }
 
   function listMarkets({ status = 'open', category, search } = {}) {
-    finalizeDue();
     const where = [];
     const params = [];
     const t = now();
@@ -339,7 +338,6 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   }
 
   function marketDetail(id, userId) {
-    finalizeDue();
     const market = getMarket(id);
     const level = (side) =>
       q(
@@ -406,9 +404,6 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
     return tx(() => {
       const market = getMarket(marketId);
       if (market.status !== 'open') throw new ApiError(400, 'This market is closed for trading');
-      if (market.creatorId === userId) {
-        throw new ApiError(403, 'You created this market, so you can’t trade in it');
-      }
       const cost = price * qty;
       if (getUser(userId).balance < cost) throw new ApiError(400, 'Not enough balance');
       adjust(userId, -cost, 'order_reserve', marketId);
@@ -493,10 +488,12 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
 
   const OUTCOMES = ['yes', 'no', 'void'];
 
-  // The market's creator reports the result. Trading stops, and traders have
-  // DISPUTE_WINDOW_MS to dispute before it pays out.
-  function proposeResolution(userId, marketId, outcome) {
+  // The market's creator reports what happened, with a source. Trading stops,
+  // and nothing pays out until an admin verifies the result.
+  function proposeResolution(userId, marketId, outcome, note) {
     if (!OUTCOMES.includes(outcome)) throw new ApiError(400, 'Invalid outcome');
+    note = String(note ?? '').trim();
+    if (note.length < 5 || note.length > 1000) throw new ApiError(400, 'Add the source for the result (5-1000 characters)');
     return tx(() => {
       const m = q('SELECT * FROM markets WHERE id = ?').get(marketId);
       if (!m) throw new ApiError(404, 'Market not found');
@@ -505,41 +502,13 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
       for (const order of q("SELECT * FROM orders WHERE market_id = ? AND status = 'open'").all(marketId)) {
         cancelRow(order);
       }
-      q("UPDATE markets SET status = 'proposed', proposed_outcome = ?, proposed_at = ? WHERE id = ?")
-        .run(outcome, now(), marketId);
+      q("UPDATE markets SET status = 'proposed', proposed_outcome = ?, proposed_at = ?, proposed_note = ? WHERE id = ?")
+        .run(outcome, now(), note, marketId);
       return { market: getMarket(marketId) };
     });
   }
 
-  // Any trader with a stake can dispute a reported result inside the window.
-  // A disputed market waits for an admin.
-  function disputeResolution(userId, marketId, reason) {
-    reason = String(reason ?? '').trim();
-    if (reason.length < 10 || reason.length > 1000) {
-      throw new ApiError(400, 'Explain the dispute in 10-1000 characters');
-    }
-    return tx(() => {
-      const m = q('SELECT * FROM markets WHERE id = ?').get(marketId);
-      if (!m) throw new ApiError(404, 'Market not found');
-      if (m.status !== 'proposed' || now() >= m.proposed_at + DISPUTE_WINDOW_MS) {
-        throw new ApiError(400, 'This result can no longer be disputed');
-      }
-      const p = q('SELECT * FROM positions WHERE market_id = ? AND user_id = ?').get(marketId, userId);
-      if (!p || p.yes_qty + p.no_qty === 0) throw new ApiError(403, 'Only traders in this market can dispute');
-      q("UPDATE markets SET status = 'disputed', dispute_reason = ?, disputed_by = ? WHERE id = ?")
-        .run(reason, userId, marketId);
-      return { market: getMarket(marketId) };
-    });
-  }
-
-  // Pays out every reported result whose dispute window has passed.
-  function finalizeDue() {
-    const due = q("SELECT id, proposed_outcome FROM markets WHERE status = 'proposed' AND proposed_at + ? <= ?")
-      .all(DISPUTE_WINDOW_MS, now());
-    for (const m of due) tx(() => settle(m.id, m.proposed_outcome));
-  }
-
-  // Admin decision: settles a disputed market, or steps in on any unsettled one.
+  // Admin verification: the only way a market pays out.
   function resolveMarket(adminId, marketId, outcome) {
     if (!OUTCOMES.includes(outcome)) throw new ApiError(400, 'Invalid outcome');
     return tx(() => {
@@ -563,7 +532,6 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   // ---------- reporting ----------
 
   function portfolio(userId) {
-    finalizeDue();
     const positions = q(
       `${MARKET_SELECT} JOIN positions p ON p.market_id = m.id WHERE p.user_id = ? ORDER BY m.id DESC`,
     ).all(userId).map((m) => ({
@@ -588,7 +556,6 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   // Where every cent is. `deposits` must always equal the sum of the rest:
   // every Avenue given out is in a balance, an open order or an open position.
   function stats() {
-    finalizeDue();
     const one = (sql) => q(sql).get().n ?? 0;
     const s = {
       deposits: one("SELECT SUM(amount) AS n FROM ledger WHERE type = 'deposit'"),
@@ -608,8 +575,8 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
     s.awaitingResolution = q(
       `${MARKET_SELECT} WHERE m.status = 'open' AND m.closes_at <= ? ORDER BY m.closes_at`,
     ).all(now()).map(marketView);
-    s.disputed = q(`${MARKET_SELECT} WHERE m.status = 'disputed' ORDER BY m.id`).all().map(marketView);
-    s.proposed = q(`${MARKET_SELECT} WHERE m.status = 'proposed' ORDER BY m.proposed_at`).all().map(marketView);
+    // 'disputed' only exists in databases from the dispute-window version.
+    s.proposed = q(`${MARKET_SELECT} WHERE m.status IN ('proposed','disputed') ORDER BY m.proposed_at`).all().map(marketView);
     s.reports = q(
       `SELECT r.market_id AS marketId, m.question, r.reason, r.created_at AS at, u.username AS reporter
        FROM reports r JOIN markets m ON m.id = r.market_id JOIN users u ON u.id = r.user_id
@@ -621,7 +588,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   return {
     db, demo, register, googleSignIn, login, logout, userForToken, getUser,
     createMarket, getMarket, listMarkets, marketDetail,
-    placeOrder, cancelOrder, proposeResolution, disputeResolution, resolveMarket, reportMarket,
+    placeOrder, cancelOrder, proposeResolution, resolveMarket, reportMarket,
     portfolio, stats,
   };
 }

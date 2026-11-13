@@ -68,8 +68,7 @@ function statusBadge(m) {
   if (m.status === 'resolved') return `<span class="badge ${m.outcome}">Resolved ${m.outcome.toUpperCase()}</span>`;
   if (m.status === 'voided') return '<span class="badge">Voided</span>';
   if (m.status === 'closed') return '<span class="badge warn">Waiting for result</span>';
-  if (m.status === 'proposed') return `<span class="badge warn">Reported ${m.proposedOutcome === 'void' ? 'void' : m.proposedOutcome.toUpperCase()}</span>`;
-  if (m.status === 'disputed') return '<span class="badge no">Disputed</span>';
+  if (m.status === 'proposed' || m.status === 'disputed') return '<span class="badge warn">Being verified</span>';
   return '<span class="badge">Open</span>';
 }
 
@@ -177,8 +176,8 @@ async function marketPage(id) {
         <div class="panel">
           <h2>How this resolves</h2>
           <div class="rules">${esc(m.description)}</div>
-          <p class="muted small" style="margin:12px 0 0">${esc(m.creator)} created this market and reports its result.
-          Traders then have ${DISPUTE_HOURS} hours to dispute it before it pays out.</p>
+          <p class="muted small" style="margin:12px 0 0">When the event happens, ${esc(m.creator)} reports the result with a source,
+          and Crowdline verifies it before anything pays out.</p>
           ${state.user && !isCreator ? `
             <details class="report">
               <summary>Report this market</summary>
@@ -205,14 +204,14 @@ async function marketPage(id) {
         ${adSlot('marketSide')}
         ${state.user?.isAdmin && !['resolved', 'voided'].includes(m.status) ? `
           <div class="panel">
-            <h2>Admin decision</h2>
-            <p class="muted small">${m.status === 'disputed'
-              ? 'A trader disputed the reported result. Your decision pays out every position and is final.'
-              : 'Normally the creator reports the result. Step in only for a dispute, a rules violation or an absent creator. This pays out immediately and cannot be undone.'}</p>
+            <h2>${m.proposedOutcome ? 'Verify the result' : 'Settle this market'}</h2>
+            <p class="muted small">${m.proposedOutcome
+              ? `${esc(m.creator)} reported <b>${outcomeWord(m.proposedOutcome)}</b>. Check the source, then confirm it or settle it differently.`
+              : 'Settle once the result is known, or void a market that breaks the rules.'}
+              This pays out every position immediately and can’t be undone.</p>
             <div class="actions">
-              <button class="buy-yes" data-action="resolve" data-outcome="yes">YES</button>
-              <button class="buy-no" data-action="resolve" data-outcome="no">NO</button>
-              <button data-action="resolve" data-outcome="void">Void and refund</button>
+              ${['yes', 'no', 'void'].map((o) => `<button class="${o === 'yes' ? 'buy-yes' : o === 'no' ? 'buy-no' : ''}"
+                data-action="resolve" data-outcome="${o}">${m.proposedOutcome === o ? 'Confirm ' : ''}${o === 'void' ? 'Void and refund' : o.toUpperCase()}</button>`).join('')}
             </div>
           </div>` : ''}
       </div>
@@ -220,44 +219,33 @@ async function marketPage(id) {
   renderTicket();
 }
 
-const DISPUTE_HOURS = 24;
 const outcomeWord = (o) => (o === 'void' ? 'Void (refund everyone)' : o.toUpperCase());
 
-// Who reports the result, and how traders can challenge it.
+// The creator reports what happened; Crowdline verifies it before payout.
 function resultPanel(d, isCreator) {
   const m = d.market;
-  const hasStake = d.position && d.position.yesQty + d.position.noQty > 0;
-  if (m.status === 'proposed') {
+  if (m.status === 'proposed' || m.status === 'disputed') {
     return `<div class="panel">
-      <h2>Reported result</h2>
-      <p><b>${outcomeWord(m.proposedOutcome)}</b>, reported by ${esc(m.creator)}.
-      It pays out ${date(m.finalizesAt)} unless a trader disputes it first.</p>
-      ${state.user && hasStake && !isCreator ? `
-        <form data-form="dispute">
-          <label>Think it’s wrong? Explain why, with a source.
-            <textarea id="dispute-reason" name="reason" required minlength="10" maxlength="1000"></textarea></label>
-          <button class="buy-no">Dispute result</button>
-        </form>` : ''}
-    </div>`;
-  }
-  if (m.status === 'disputed') {
-    return `<div class="panel">
-      <h2>Result disputed</h2>
-      <p>${esc(m.creator)} reported <b>${outcomeWord(m.proposedOutcome)}</b>. A trader disputed it:</p>
-      <p class="rules muted">${esc(m.disputeReason)}</p>
-      <p class="muted small">An admin will review the dispute and decide. Stakes stay held until then.</p>
+      <h2>Result being verified</h2>
+      <p>${esc(m.creator)} reported <b>${outcomeWord(m.proposedOutcome)}</b>${m.reportedAt ? ` on ${date(m.reportedAt)}` : ''}.</p>
+      ${m.reportNote ? `<p class="rules muted">Source: ${esc(m.reportNote)}</p>` : ''}
+      <p class="muted small">Crowdline checks the result before anything pays out. Trading is closed until then.</p>
     </div>`;
   }
   if (isCreator && (m.status === 'open' || m.status === 'closed')) {
     return `<div class="panel">
       <h2>Report the result</h2>
-      <p class="muted small">You created this market, so you report what happened, following its rules.
-      Trading stops when you report. Traders get ${DISPUTE_HOURS} hours to dispute before anything pays out.</p>
-      <div class="actions">
-        <button class="buy-yes" data-action="propose" data-outcome="yes">YES</button>
-        <button class="buy-no" data-action="propose" data-outcome="no">NO</button>
-        <button data-action="propose" data-outcome="void">Void and refund</button>
-      </div>
+      <p class="muted small">You created this market, so once the event happens, tell us what happened and where to check it.
+      Trading stops when you report, and Crowdline verifies the result before anything pays out.</p>
+      <form data-form="propose">
+        <div class="sides outcome-pick">
+          ${['yes', 'no', 'void'].map((o) => `<label class="pick"><input type="radio" name="outcome" value="${o}" required>
+            <span>${o === 'void' ? 'Void' : o.toUpperCase()}</span></label>`).join('')}
+        </div>
+        <label>Source<textarea id="report-note" name="note" required minlength="5" maxlength="1000"
+          placeholder="Link or name the source that shows the result."></textarea></label>
+        <button class="primary">Report result</button>
+      </form>
     </div>`;
   }
   return '';
@@ -293,11 +281,6 @@ function renderTicket() {
   if (!state.user) {
     el.innerHTML = `<h2>Trade</h2><p class="muted">Sign in to trade. New members get 1,000 Avenues free.</p>
       <a class="btn primary" href="${signInHref()}">Sign in</a>`;
-    return;
-  }
-  if (state.user.id === state.detail.market.creatorId) {
-    el.innerHTML = `<h2>Trade</h2><p class="muted">You created this market, so you can’t trade in it.
-      Creators report the result, and keeping them out of the trading removes the reason to report it wrongly.</p>`;
     return;
   }
   const t = state.ticket;
@@ -376,14 +359,14 @@ function createPage() {
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   view.innerHTML = `
     <h1>Create a market</h1>
-    <p class="muted">Ask a yes-or-no question with an outcome anyone can check. As the creator you report the result,
-    and you can’t trade in your own market.</p>
+    <p class="muted">Ask a yes-or-no question with an outcome anyone can check. You can trade in your own market.
+    When the event happens you report the result, and Crowdline verifies it.</p>
     <div class="panel form">
       <h2>Market rules</h2>
       <ul class="rule-list">
         <li>The result must be public and checkable. Name the source that decides it.</li>
         <li>No markets on anyone’s death, injury or safety, or on violence, terrorism, war casualties or crimes.</li>
-        <li>No markets about private individuals or anyone under 18.</li>
+        <li>No markets about private individuals.</li>
         <li>No markets you or a friend can decide or influence.</li>
       </ul>
       <p class="muted small">Markets that break these rules are voided and every stake is refunded.</p>
@@ -513,23 +496,17 @@ async function adminPage() {
       </div>
       <span class="badge ${s.balanced ? 'yes' : 'no'}">${s.balanced ? 'Books balance: every payout is fully funded by traders' : 'Books do not balance'}</span>
     </div>
-    <div class="panel scroll"><h2>Disputed results</h2>
-      ${s.disputed.length ? `<table>${s.disputed.map((m) => `<tr>
-        <td><a href="#/m/${m.id}">${esc(m.question)}</a><div class="muted small">${esc(m.disputeReason)}</div></td>
-        <td class="r">Reported ${outcomeWord(m.proposedOutcome)}</td></tr>`).join('')}</table>`
-        : '<div class="muted">No disputes to decide.</div>'}
-    </div>
     <div class="panel scroll"><h2>Reported markets</h2>
       ${s.reports.length ? `<table>${s.reports.map((r) => `<tr>
         <td><a href="#/m/${r.marketId}">${esc(r.question)}</a><div class="muted small">${esc(r.reason)}</div></td>
         <td class="r muted">${esc(r.reporter)} · ${date(r.at)}</td></tr>`).join('')}</table>`
         : '<div class="muted">No open reports.</div>'}
     </div>
-    <div class="panel scroll"><h2>Results in their dispute window</h2>
+    <div class="panel scroll"><h2>Results to verify</h2>
       ${s.proposed.length ? `<table>${s.proposed.map((m) => `<tr>
-        <td><a href="#/m/${m.id}">${esc(m.question)}</a></td>
-        <td class="r">${outcomeWord(m.proposedOutcome)} · pays out ${date(m.finalizesAt)}</td></tr>`).join('')}</table>`
-        : '<div class="muted">None right now.</div>'}
+        <td><a href="#/m/${m.id}">${esc(m.question)}</a>${m.reportNote ? `<div class="muted small">Source: ${esc(m.reportNote)}</div>` : ''}</td>
+        <td class="r">${outcomeWord(m.proposedOutcome)}</td></tr>`).join('')}</table>`
+        : '<div class="muted">Nothing to verify.</div>'}
     </div>
     <div class="panel scroll"><h2>Closed, waiting for the creator</h2>
       ${s.awaitingResolution.length ? `<table>${s.awaitingResolution.map((m) => `<tr>
@@ -552,14 +529,13 @@ function termsPage() {
       <h2>No fees</h2>
       <p>When a market settles, every winning contract pays its holder 1 Avenue in full. Crowdline takes nothing.</p>
       <h2>Who decides the result</h2>
-      <p>The member who created a market reports its result, following the rules written in the market.
-      Creators can’t trade in their own markets. After a result is reported, trading stops and traders have
-      ${DISPUTE_HOURS} hours to dispute it. An undisputed result then pays out automatically. A disputed result is
-      reviewed by a Crowdline admin, whose decision is final. Admins can also void a market that breaks the
-      rules or has no reported result, which refunds every stake.</p>
+      <p>Crowdline verifies every result. When the event happens, the member who created the market reports what
+      happened and the source that shows it, and trading stops. A Crowdline admin checks the result against the
+      market’s rules before anything pays out, and the admin’s decision is final. Creators can trade in their own
+      markets like anyone else. Admins can also void a market that breaks the rules, which refunds every stake.</p>
       <h2>Market rules</h2>
       <p>No markets on anyone’s death, injury or safety; on violence, terrorism, war casualties or crimes; about private
-      individuals or anyone under 18; or on anything the creator can decide or influence. Report markets that break these rules.</p>
+      individuals; or on anything the creator can decide or influence. Report markets that break these rules.</p>
       <h2>Avenues are play money</h2>
       <p>Avenues have no cash value. New members get 1,000 Avenues free when they first sign in${state.config.googleClientId ? ' with Google' : ''},
       once per account. Avenues can’t be bought, sold, withdrawn, transferred or exchanged for prizes. When you place an
@@ -676,7 +652,7 @@ function privacyPage() {
       <p>${state.config.googleClientId
         ? 'When you sign in with Google, Crowdline receives your Google account ID, name and email address from Google. It keeps only the account ID, to recognise you next time, and a username made from your name. It doesn’t store your email address or get access to anything else in your Google account.'
         : 'Crowdline stores your username and a scrambled (hashed) copy of your password.'}
-      It also stores the markets you create, your orders, trades, balance, and any reports or disputes you send.
+      It also stores the markets you create, your orders, trades, balance, and any reports you send.
       Usernames, markets and trades can be seen by other members.</p>
       ${state.config.local ? `<h2>This copy runs in your browser</h2>
       <p>On this site, Crowdline runs entirely in your browser. Your account and everything you do is saved in your
@@ -745,13 +721,6 @@ const actions = {
     toast(outcome === 'void' ? 'Market voided, stakes refunded' : `Market settled as ${outcome.toUpperCase()}`);
     render();
   },
-  async propose(el) {
-    const outcome = el.dataset.outcome;
-    if (!confirm(`Report the result as ${outcomeWord(outcome)}? Trading stops now, and traders get ${DISPUTE_HOURS} hours to dispute it.`)) return;
-    await api(`/markets/${state.detail.market.id}/propose`, { method: 'POST', body: { outcome } });
-    toast('Result reported. It pays out after the dispute window.');
-    render();
-  },
   async resetDemo() {
     if (!confirm('Erase every account, market and trade in this browser and start over with the example markets?')) return;
     await api('/reset-demo', { method: 'POST' });
@@ -776,9 +745,9 @@ const forms = {
     toast('Market created');
     location.hash = `#/m/${market.id}`;
   },
-  async dispute(data) {
-    await api(`/markets/${state.detail.market.id}/dispute`, { method: 'POST', body: data });
-    toast('Dispute sent. An admin will decide.');
+  async propose(data) {
+    await api(`/markets/${state.detail.market.id}/propose`, { method: 'POST', body: data });
+    toast('Result reported. Crowdline will verify it.');
     render();
   },
   async report(data) {
