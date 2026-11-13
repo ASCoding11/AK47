@@ -241,27 +241,28 @@ test('browser: a failed order changes nothing', async () => {
   assert.equal(storage.getItem('crowdline:state'), before);
 });
 
-test('pages demo: example markets are seeded and the visitor becomes admin', async () => {
+test('pages demo: starts with no markets until someone creates one', async () => {
   // Password accounts: the mode the site uses when no Google sign-in is configured.
   const config = { googleClientId: '', firebase: {}, ads: { client: '', slots: {}, showPlaceholders: false } };
   const api = createLocalApi({ storage: memoryStorage(), config });
-  const { markets } = await api.request('GET', '/markets?status=open');
-  assert.equal(markets.length, 6);
-  assert.ok(markets.every((m) => m.volume > 0 && m.yesBid != null && m.yesAsk != null && m.yesBid < m.yesAsk));
+  assert.equal((await api.request('GET', '/markets?status=open')).markets.length, 0);
   await assert.rejects(api.request('GET', '/portfolio'), /Log in/);
   const { user } = await api.request('POST', '/register', { username: 'visitor', password: 'password1' });
   assert.equal(user.isAdmin, true);
-  const target = markets[0];
-  const r = await api.request('POST', `/markets/${target.id}/orders`, { side: 'yes', price: target.yesAsk, qty: 10 });
-  assert.equal(r.filled, 10);
-  await api.request('POST', '/login', { username: 'visitor', password: 'password1' });
-  await api.request('POST', `/markets/${target.id}/resolve`, { outcome: 'yes' });
+  const { market } = await api.request('POST', '/markets', {
+    question: 'Will it snow in Denver this week?',
+    description: 'Resolves YES if DEN records measurable snow before Sunday.',
+    category: 'Science',
+    closesAt: Date.now() + DAY,
+  });
+  assert.equal((await api.request('GET', '/markets?status=open')).markets.length, 1);
+  const r = await api.request('POST', `/markets/${market.id}/orders`, { side: 'yes', price: 60, qty: 10 });
+  assert.equal(r.resting, 10);
   const stats = await api.request('GET', '/admin/stats');
   assert.equal(stats.balanced, true);
-  assert.equal(stats.feeRevenue, 0);
-  assert.equal(stats.deposits, stats.userBalances + stats.orderEscrow + stats.positionEscrow);
   await api.request('POST', '/reset-demo');
   assert.equal((await api.request('GET', '/me')).user, null);
+  assert.equal((await api.request('GET', '/markets?status=open')).markets.length, 0);
 });
 
 // ---------- Google sign-in ----------

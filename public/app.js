@@ -800,7 +800,7 @@ const actions = {
     render();
   },
   async resetDemo() {
-    if (!confirm('Erase every account, market and trade in this browser and start over with the example markets?')) return;
+    if (!confirm('Erase every account, market and trade in this browser and start over?')) return;
     await api('/reset-demo', { method: 'POST' });
     location.hash = '#/';
     location.reload();

@@ -154,16 +154,6 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
     });
   }
 
-  // Simulated traders that make the demo feel alive. They have no password.
-  function createExampleUser(username) {
-    return tx(() => {
-      const u = { id: nextId('user'), username, pw: null, balance: 0, is_admin: false, example: true, created_at: now() };
-      s.users.push(u);
-      adjust(u.id, WELCOME_BONUS * 10, 'deposit');
-      return publicUser(u);
-    });
-  }
-
   async function login(username, password) {
     const u = findByName(String(username ?? '').trim());
     const [salt, hash] = u?.pw?.split(':') ?? [];
@@ -507,7 +497,7 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   }
 
   return {
-    demo, register, googleSignIn, login, logout, userForToken, getUser, createExampleUser,
+    demo, register, googleSignIn, login, logout, userForToken, getUser,
     createMarket, getMarket, listMarkets, marketDetail,
     placeOrder, cancelOrder, proposeResolution, resolveMarket, reportMarket,
     portfolio, stats, isEmpty,
