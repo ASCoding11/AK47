@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEngine as createSqlEngine } from '../src/engine.js';
+import { createEngine as createSqlEngine, DISPUTE_WINDOW_MS } from '../src/engine.js';
 import { createEngine as createLocalEngine, memoryStorage } from '../src/local-engine.js';
 import { createLocalApi } from '../src/local-api.js';
 
@@ -19,14 +19,15 @@ async function setup() {
   const admin = (await engine.register('admin', 'password1')).user;
   const alice = (await engine.register('alice', 'password1')).user;
   const bob = (await engine.register('bob', 'password1')).user;
-  const market = engine.createMarket(alice.id, {
+  const maker = (await engine.register('maker', 'password1')).user;
+  const market = engine.createMarket(maker.id, {
     question: 'Will it rain in Seattle tomorrow?',
     description: 'Resolves YES if SEA airport records measurable rain.',
     category: 'Science',
     closesAt: clock + DAY,
   });
   const balance = (u) => engine.getUser(u.id).balance;
-  return { engine, admin, alice, bob, market, balance, advance: (ms) => (clock += ms) };
+  return { engine, admin, alice, bob, maker, market, balance, advance: (ms) => (clock += ms) };
 }
 
 test(`${kind}: first user is admin and everyone starts with demo credits`, async () => {
@@ -152,13 +153,79 @@ test(`${kind}: money is conserved through random trading and settlement`, async 
   assert.equal(s.deposits, s.userBalances + s.feeRevenue);
 });
 
+test(`${kind}: creators cannot trade their own market`, async () => {
+  const { engine, maker, market } = await setup();
+  assert.throws(() => engine.placeOrder(maker.id, market.id, { side: 'yes', price: 50, qty: 1 }), /created this market/);
+});
+
+test(`${kind}: signup requires agreeing to the terms`, async () => {
+  const engine = make(() => Date.now());
+  await assert.rejects(async () => engine.register('newbie', 'password1', false), /18 or older/);
+});
+
+test(`${kind}: creator's result pays out after the dispute window`, async () => {
+  const { engine, alice, bob, maker, market, balance, advance } = await setup();
+  engine.placeOrder(alice.id, market.id, { side: 'yes', price: 60, qty: 10 });
+  engine.placeOrder(bob.id, market.id, { side: 'no', price: 40, qty: 10 });
+  engine.placeOrder(alice.id, market.id, { side: 'yes', price: 30, qty: 5 }); // resting
+  assert.throws(() => engine.proposeResolution(alice.id, market.id, 'yes'), /Only the market/);
+  engine.proposeResolution(maker.id, market.id, 'yes');
+  // Trading stops and the resting order is refunded.
+  assert.equal(engine.getMarket(market.id).status, 'proposed');
+  assert.equal(balance(alice), 100_000 - 600);
+  assert.throws(() => engine.placeOrder(bob.id, market.id, { side: 'no', price: 50, qty: 1 }), /closed/);
+  assert.throws(() => engine.proposeResolution(maker.id, market.id, 'no'), /already been reported/);
+  // Nothing pays out inside the window.
+  advance(DISPUTE_WINDOW_MS - 1000);
+  engine.listMarkets();
+  assert.equal(engine.getMarket(market.id).status, 'proposed');
+  advance(1000);
+  engine.listMarkets();
+  assert.equal(engine.getMarket(market.id).status, 'resolved');
+  assert.equal(balance(alice), 100_000 + 400 - 40);
+  assert.equal(engine.stats().balanced, true);
+  assert.throws(() => engine.disputeResolution(bob.id, market.id, 'Too late to complain now'), /no longer/);
+});
+
+test(`${kind}: a disputed result waits for an admin`, async () => {
+  const { engine, admin, alice, bob, maker, market, balance, advance } = await setup();
+  engine.placeOrder(alice.id, market.id, { side: 'yes', price: 60, qty: 10 });
+  engine.placeOrder(bob.id, market.id, { side: 'no', price: 40, qty: 10 });
+  engine.proposeResolution(maker.id, market.id, 'yes');
+  const outsider = (await engine.register('outsider', 'password1')).user;
+  assert.throws(() => engine.disputeResolution(outsider.id, market.id, 'I just disagree with it'), /Only traders/);
+  assert.throws(() => engine.disputeResolution(bob.id, market.id, 'short'), /10-1000/);
+  engine.disputeResolution(bob.id, market.id, 'It did not rain at SEA per the NWS daily report.');
+  advance(2 * DISPUTE_WINDOW_MS);
+  engine.listMarkets();
+  const m = engine.getMarket(market.id);
+  assert.equal(m.status, 'disputed');
+  assert.match(m.disputeReason, /NWS/);
+  assert.equal(engine.stats().disputed.length, 1);
+  assert.equal(engine.stats().balanced, true);
+  engine.resolveMarket(admin.id, market.id, 'no');
+  assert.equal(balance(bob), 100_000 + 600 - 60);
+  assert.equal(engine.stats().disputed.length, 0);
+});
+
+test(`${kind}: users can report a market to admins`, async () => {
+  const { engine, alice, market } = await setup();
+  assert.throws(() => engine.reportMarket(alice.id, market.id, 'bad'), /5-1000/);
+  engine.reportMarket(alice.id, market.id, 'This is about a private person');
+  engine.reportMarket(alice.id, market.id, 'Updated: about a private person');
+  const { reports } = engine.stats();
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].reporter, 'alice');
+});
+
 } // engines
 
 test('browser: state survives a reload of the page', async () => {
   const storage = memoryStorage();
   const first = createLocalEngine({ storage });
   const { user } = await first.register('alice', 'password1');
-  const m = first.createMarket(user.id, {
+  const maker = (await first.register('maker', 'password1')).user;
+  const m = first.createMarket(maker.id, {
     question: 'Will it snow in Denver this week?',
     description: 'Resolves YES if DEN records measurable snow before Sunday.',
     category: 'Science',
@@ -176,7 +243,8 @@ test('browser: a failed order changes nothing', async () => {
   const storage = memoryStorage();
   const engine = createLocalEngine({ storage });
   const { user } = await engine.register('alice', 'password1');
-  const m = engine.createMarket(user.id, {
+  const maker = (await engine.register('maker', 'password1')).user;
+  const m = engine.createMarket(maker.id, {
     question: 'Will it snow in Denver this week?',
     description: 'Resolves YES if DEN records measurable snow before Sunday.',
     category: 'Science',
@@ -193,11 +261,13 @@ test('pages demo: example markets are seeded and the visitor becomes admin', asy
   assert.equal(markets.length, 6);
   assert.ok(markets.every((m) => m.volume > 0 && m.yesBid != null && m.yesAsk != null && m.yesBid < m.yesAsk));
   await assert.rejects(api.request('GET', '/portfolio'), /Log in/);
-  const { user } = await api.request('POST', '/register', { username: 'visitor', password: 'password1' });
+  const { user } = await api.request('POST', '/register', { username: 'visitor', password: 'password1', agree: 'on' });
   assert.equal(user.isAdmin, true);
   const target = markets[0];
   const r = await api.request('POST', `/markets/${target.id}/orders`, { side: 'yes', price: target.yesAsk, qty: 10 });
   assert.equal(r.filled, 10);
+  await assert.rejects(api.request('POST', '/register', { username: 'second', password: 'password1' }), /18 or older/);
+  await api.request('POST', '/login', { username: 'visitor', password: 'password1' });
   await api.request('POST', `/markets/${target.id}/resolve`, { outcome: 'yes' });
   const stats = await api.request('GET', '/admin/stats');
   assert.equal(stats.balanced, true);

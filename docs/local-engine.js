@@ -12,6 +12,7 @@
 //   * At settlement the platform keeps FEE_BPS of each user's net profit.
 
 export const FEE_BPS = 1000; // 10% of profit
+export const DISPUTE_WINDOW_MS = 24 * 3_600_000; // traders' time to dispute a creator's result
 export const CATEGORIES = ['Politics', 'Sports', 'Economics', 'Tech', 'Culture', 'Science', 'Other'];
 const SIGNUP_BONUS = 100_000;
 const FAUCET_AMOUNT = 50_000;
@@ -57,6 +58,7 @@ function freshState() {
     trades: [],
     positions: {},
     ledger: [],
+    reports: [],
   };
 }
 
@@ -66,7 +68,7 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   function load() {
     try {
       const raw = storage.getItem(key);
-      if (raw) return JSON.parse(raw);
+      if (raw) return { reports: [], ...JSON.parse(raw) };
     } catch {}
     return freshState();
   }
@@ -113,9 +115,10 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
     return s.users.find((u) => u.username.toLowerCase() === lower);
   }
 
-  async function register(username, password) {
+  async function register(username, password, agreed = true) {
     username = String(username ?? '').trim();
     password = String(password ?? '');
+    if (!agreed) throw new ApiError(400, 'Confirm you are 18 or older and agree to the terms');
     if (!/^[A-Za-z0-9_]{3,20}$/.test(username)) {
       throw new ApiError(400, 'Username must be 3-20 letters, numbers or underscores');
     }
@@ -193,6 +196,7 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
       description: m.description,
       category: m.category,
       creator: userRow(m.creator_id).username,
+      creatorId: m.creator_id,
       closesAt: m.closes_at,
       status: closed ? 'closed' : m.status,
       outcome: m.outcome,
@@ -200,6 +204,9 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
       volume: m.volume,
       createdAt: m.created_at,
       resolvedAt: m.resolved_at,
+      proposedOutcome: m.proposed_outcome ?? null,
+      finalizesAt: m.proposed_at == null ? null : m.proposed_at + DISPUTE_WINDOW_MS,
+      disputeReason: m.dispute_reason ?? null,
     };
   }
 
@@ -246,13 +253,14 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   };
 
   function listMarkets({ status = 'open', category, search } = {}) {
+    finalizeDue();
     const t = now();
     const needle = search ? String(search).slice(0, 100).toLowerCase() : '';
     return s.markets
       .filter((m) => {
         if (status === 'open' && !(m.status === 'open' && m.closes_at > t)) return false;
-        if (status === 'closed' && !(m.status === 'open' && m.closes_at <= t)) return false;
-        if (status === 'settled' && m.status === 'open') return false;
+        if (status === 'closed' && !((m.status === 'open' && m.closes_at <= t) || m.status === 'proposed' || m.status === 'disputed')) return false;
+        if (status === 'settled' && !(m.status === 'resolved' || m.status === 'voided')) return false;
         if (category && CATEGORIES.includes(category) && m.category !== category) return false;
         if (needle && !m.question.toLowerCase().includes(needle)) return false;
         return true;
@@ -273,6 +281,7 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   }
 
   function marketDetail(id, userId) {
+    finalizeDue();
     const market = getMarket(id);
     const level = (side) => {
       const byPrice = new Map();
@@ -322,6 +331,9 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
     return tx(() => {
       const market = getMarket(marketId);
       if (market.status !== 'open') throw new ApiError(400, 'This market is closed for trading');
+      if (market.creatorId === userId) {
+        throw new ApiError(403, 'You created this market, so you can’t trade in it');
+      }
       if (getUser(userId).balance < price * qty) throw new ApiError(400, 'Not enough balance');
       adjust(userId, -price * qty, 'order_reserve', marketId);
 
@@ -378,38 +390,100 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
 
   // ---------- settlement ----------
 
+  // Pays out a market. Runs inside a transaction.
+  function settle(m, outcome) {
+    for (const order of openOrders(m.id)) cancelRow(order);
+    let fees = 0;
+    for (const p of Object.values(s.positions).filter((p) => p.market_id === m.id)) {
+      const cost = p.yes_cost + p.no_cost;
+      const payout = outcome === 'void' ? cost : 100 * (outcome === 'yes' ? p.yes_qty : p.no_qty);
+      const fee = feeOn(payout - cost);
+      adjust(p.user_id, payout - fee, outcome === 'void' ? 'void_refund' : 'payout', m.id);
+      p.payout = payout;
+      p.fee = fee;
+      fees += fee;
+    }
+    if (fees > 0) {
+      s.ledger.push({ id: s.ledger.length + 1, user_id: null, market_id: m.id, type: 'fee', amount: fees, created_at: now() });
+    }
+    m.status = outcome === 'void' ? 'voided' : 'resolved';
+    m.outcome = outcome === 'void' ? null : outcome;
+    m.resolved_at = now();
+    return { market: marketView(m), fees };
+  }
+
+  const OUTCOMES = ['yes', 'no', 'void'];
+
+  // The market's creator reports the result; traders then have
+  // DISPUTE_WINDOW_MS to dispute before it pays out.
+  function proposeResolution(userId, marketId, outcome) {
+    if (!OUTCOMES.includes(outcome)) throw new ApiError(400, 'Invalid outcome');
+    return tx(() => {
+      const m = marketRow(marketId);
+      if (!m) throw new ApiError(404, 'Market not found');
+      if (m.creator_id !== userId) throw new ApiError(403, 'Only the market’s creator can report the result');
+      if (m.status !== 'open') throw new ApiError(400, 'A result has already been reported');
+      for (const order of openOrders(marketId)) cancelRow(order);
+      m.status = 'proposed';
+      m.proposed_outcome = outcome;
+      m.proposed_at = now();
+      return { market: marketView(m) };
+    });
+  }
+
+  function disputeResolution(userId, marketId, reason) {
+    reason = String(reason ?? '').trim();
+    if (reason.length < 10 || reason.length > 1000) {
+      throw new ApiError(400, 'Explain the dispute in 10-1000 characters');
+    }
+    return tx(() => {
+      const m = marketRow(marketId);
+      if (!m) throw new ApiError(404, 'Market not found');
+      if (m.status !== 'proposed' || now() >= m.proposed_at + DISPUTE_WINDOW_MS) {
+        throw new ApiError(400, 'This result can no longer be disputed');
+      }
+      const p = s.positions[`${marketId}:${userId}`];
+      if (!p || p.yes_qty + p.no_qty === 0) throw new ApiError(403, 'Only traders in this market can dispute');
+      m.status = 'disputed';
+      m.dispute_reason = reason;
+      m.disputed_by = userId;
+      return { market: marketView(m) };
+    });
+  }
+
+  function finalizeDue() {
+    for (const m of s.markets) {
+      if (m.status === 'proposed' && m.proposed_at + DISPUTE_WINDOW_MS <= now()) {
+        tx(() => settle(marketRow(m.id), m.proposed_outcome));
+      }
+    }
+  }
+
   function resolveMarket(adminId, marketId, outcome) {
-    if (!['yes', 'no', 'void'].includes(outcome)) throw new ApiError(400, 'Invalid outcome');
+    if (!OUTCOMES.includes(outcome)) throw new ApiError(400, 'Invalid outcome');
     return tx(() => {
       if (!getUser(adminId)?.isAdmin) throw new ApiError(403, 'Only an admin can resolve markets');
       const m = marketRow(marketId);
       if (!m) throw new ApiError(404, 'Market not found');
-      if (m.status !== 'open') throw new ApiError(400, 'Market is already settled');
+      if (m.status === 'resolved' || m.status === 'voided') throw new ApiError(400, 'Market is already settled');
+      return settle(m, outcome);
+    });
+  }
 
-      for (const order of openOrders(marketId)) cancelRow(order);
-      let fees = 0;
-      for (const p of Object.values(s.positions).filter((p) => p.market_id === marketId)) {
-        const cost = p.yes_cost + p.no_cost;
-        const payout = outcome === 'void' ? cost : 100 * (outcome === 'yes' ? p.yes_qty : p.no_qty);
-        const fee = feeOn(payout - cost);
-        adjust(p.user_id, payout - fee, outcome === 'void' ? 'void_refund' : 'payout', marketId);
-        p.payout = payout;
-        p.fee = fee;
-        fees += fee;
-      }
-      if (fees > 0) {
-        s.ledger.push({ id: s.ledger.length + 1, user_id: null, market_id: marketId, type: 'fee', amount: fees, created_at: now() });
-      }
-      m.status = outcome === 'void' ? 'voided' : 'resolved';
-      m.outcome = outcome === 'void' ? null : outcome;
-      m.resolved_at = now();
-      return { market: marketView(m), fees };
+  function reportMarket(userId, marketId, reason) {
+    reason = String(reason ?? '').trim();
+    if (reason.length < 5 || reason.length > 1000) throw new ApiError(400, 'Say what is wrong in 5-1000 characters');
+    getMarket(marketId);
+    tx(() => {
+      s.reports = s.reports.filter((r) => !(r.market_id === marketId && r.user_id === userId));
+      s.reports.push({ market_id: marketId, user_id: userId, reason, created_at: now() });
     });
   }
 
   // ---------- reporting ----------
 
   function portfolio(userId) {
+    finalizeDue();
     const positions = Object.values(s.positions)
       .filter((p) => p.user_id === userId)
       .sort((a, b) => b.market_id - a.market_id)
@@ -430,8 +504,9 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   }
 
   function stats() {
+    finalizeDue();
     const sum = (rows, f) => rows.reduce((n, r) => n + f(r), 0);
-    const openMarkets = new Set(s.markets.filter((m) => m.status === 'open').map((m) => m.id));
+    const openMarkets = new Set(s.markets.filter((m) => !['resolved', 'voided'].includes(m.status)).map((m) => m.id));
     const st = {
       deposits: sum(s.ledger.filter((l) => l.type === 'deposit'), (l) => l.amount),
       userBalances: sum(s.users, (u) => u.balance),
@@ -447,6 +522,13 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
       .filter((m) => m.status === 'open' && m.closes_at <= now())
       .sort((a, b) => a.closes_at - b.closes_at)
       .map(marketView);
+    st.disputed = s.markets.filter((m) => m.status === 'disputed').map(marketView);
+    st.proposed = s.markets.filter((m) => m.status === 'proposed').sort((a, b) => a.proposed_at - b.proposed_at).map(marketView);
+    st.reports = s.reports
+      .filter((r) => !['resolved', 'voided'].includes(marketRow(r.market_id).status))
+      .sort((a, b) => b.created_at - a.created_at)
+      .slice(0, 100)
+      .map((r) => ({ marketId: r.market_id, question: marketRow(r.market_id).question, reason: r.reason, at: r.created_at, reporter: userRow(r.user_id).username }));
     st.feesByMarket = s.ledger
       .filter((l) => l.type === 'fee')
       .reverse()
@@ -462,6 +544,7 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   return {
     demo, register, login, logout, userForToken, getUser, faucet, createExampleUser,
     createMarket, getMarket, listMarkets, marketDetail,
-    placeOrder, cancelOrder, resolveMarket, portfolio, stats, isEmpty,
+    placeOrder, cancelOrder, proposeResolution, disputeResolution, resolveMarket, reportMarket,
+    portfolio, stats, isEmpty,
   };
 }

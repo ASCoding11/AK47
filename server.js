@@ -58,7 +58,7 @@ const route = (method, pattern, handler, { auth = false } = {}) =>
 route('GET', '/api/config', () => ({ feeBps: FEE_BPS, categories: CATEGORIES, demo: DEMO }));
 route('GET', '/api/me', ({ user }) => ({ user }));
 route('POST', '/api/register', ({ body, res }) => {
-  const { user, token } = engine.register(body.username, body.password);
+  const { user, token } = engine.register(body.username, body.password, body.agree === true || body.agree === 'on');
   res.setHeader('Set-Cookie', sessionCookie(token));
   return { user };
 });
@@ -84,6 +84,9 @@ route('GET', '/api/markets', ({ query }) => ({
 route('POST', '/api/markets', ({ user, body }) => ({ market: engine.createMarket(user.id, body) }), { auth: true });
 route('GET', '/api/markets/:id', ({ user, id }) => engine.marketDetail(id, user?.id));
 route('POST', '/api/markets/:id/orders', ({ user, id, body }) => engine.placeOrder(user.id, id, body), { auth: true });
+route('POST', '/api/markets/:id/propose', ({ user, id, body }) => engine.proposeResolution(user.id, id, body.outcome), { auth: true });
+route('POST', '/api/markets/:id/dispute', ({ user, id, body }) => engine.disputeResolution(user.id, id, body.reason), { auth: true });
+route('POST', '/api/markets/:id/report', ({ user, id, body }) => engine.reportMarket(user.id, id, body.reason) ?? {}, { auth: true });
 route('POST', '/api/markets/:id/resolve', ({ user, id, body }) => engine.resolveMarket(user.id, id, body.outcome), { auth: true });
 route('DELETE', '/api/orders/:id', ({ user, id }) => engine.cancelOrder(user.id, id) ?? {}, { auth: true });
 route('GET', '/api/portfolio', ({ user }) => engine.portfolio(user.id), { auth: true });

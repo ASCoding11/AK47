@@ -11,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
 export const FEE_BPS = 1000; // 10% of profit
+export const DISPUTE_WINDOW_MS = 24 * 3_600_000; // traders' time to dispute a creator's result
 export const CATEGORIES = ['Politics', 'Sports', 'Economics', 'Tech', 'Culture', 'Science', 'Other'];
 const SIGNUP_BONUS = 100_000; // demo credits: $1,000
 const FAUCET_AMOUNT = 50_000;
@@ -44,7 +45,7 @@ CREATE TABLE IF NOT EXISTS markets (
   description TEXT NOT NULL DEFAULT '',
   category TEXT NOT NULL,
   closes_at INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'open',   -- open | resolved | voided
+  status TEXT NOT NULL DEFAULT 'open',   -- open | proposed | disputed | resolved | voided
   outcome TEXT,                          -- yes | no
   last_price INTEGER,                    -- last traded YES price
   volume INTEGER NOT NULL DEFAULT 0,     -- contracts traded
@@ -94,7 +95,22 @@ CREATE TABLE IF NOT EXISTS ledger (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ledger_user ON ledger(user_id, id);
+CREATE TABLE IF NOT EXISTS reports (
+  market_id INTEGER NOT NULL REFERENCES markets(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  reason TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (market_id, user_id)
+);
 `;
+
+// Columns added after the first release; ALTER fails harmlessly if present.
+const MIGRATIONS = [
+  'ALTER TABLE markets ADD COLUMN proposed_outcome TEXT',
+  'ALTER TABLE markets ADD COLUMN proposed_at INTEGER',
+  'ALTER TABLE markets ADD COLUMN dispute_reason TEXT',
+  'ALTER TABLE markets ADD COLUMN disputed_by INTEGER',
+];
 
 function hashPassword(password) {
   const salt = randomBytes(16);
@@ -116,6 +132,11 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  for (const sql of MIGRATIONS) {
+    try {
+      db.exec(sql);
+    } catch {}
+  }
 
   const q = (sql) => db.prepare(sql);
 
@@ -145,9 +166,10 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
     return u && { id: u.id, username: u.username, balance: u.balance, isAdmin: !!u.is_admin };
   }
 
-  function register(username, password) {
+  function register(username, password, agreed = true) {
     username = String(username ?? '').trim();
     password = String(password ?? '');
+    if (!agreed) throw new ApiError(400, 'Confirm you are 18 or older and agree to the terms');
     if (!/^[A-Za-z0-9_]{3,20}$/.test(username)) {
       throw new ApiError(400, 'Username must be 3-20 letters, numbers or underscores');
     }
@@ -216,6 +238,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
       description: m.description,
       category: m.category,
       creator: m.creator,
+      creatorId: m.creator_id,
       closesAt: m.closes_at,
       status: closed ? 'closed' : m.status,
       outcome: m.outcome,
@@ -223,6 +246,9 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
       volume: m.volume,
       createdAt: m.created_at,
       resolvedAt: m.resolved_at,
+      proposedOutcome: m.proposed_outcome ?? null,
+      finalizesAt: m.proposed_at == null ? null : m.proposed_at + DISPUTE_WINDOW_MS,
+      disputeReason: m.dispute_reason ?? null,
     };
   }
 
@@ -260,6 +286,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   }
 
   function listMarkets({ status = 'open', category, search } = {}) {
+    finalizeDue();
     const where = [];
     const params = [];
     const t = now();
@@ -267,7 +294,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
       where.push("m.status = 'open' AND m.closes_at > ?");
       params.push(t);
     } else if (status === 'closed') {
-      where.push("m.status = 'open' AND m.closes_at <= ?");
+      where.push("((m.status = 'open' AND m.closes_at <= ?) OR m.status IN ('proposed','disputed'))");
       params.push(t);
     } else if (status === 'settled') {
       where.push("m.status IN ('resolved','voided')");
@@ -297,6 +324,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   }
 
   function marketDetail(id, userId) {
+    finalizeDue();
     const market = getMarket(id);
     const level = (side) =>
       q(
@@ -364,6 +392,9 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
     return tx(() => {
       const market = getMarket(marketId);
       if (market.status !== 'open') throw new ApiError(400, 'This market is closed for trading');
+      if (market.creatorId === userId) {
+        throw new ApiError(403, 'You created this market, so you can’t trade in it');
+      }
       const cost = price * qty;
       if (getUser(userId).balance < cost) throw new ApiError(400, 'Not enough balance');
       adjust(userId, -cost, 'order_reserve', marketId);
@@ -425,45 +456,108 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
 
   // ---------- settlement ----------
 
-  // outcome: 'yes' | 'no' | 'void'. Void returns every stake in full.
+  // Pays out a market. outcome: 'yes' | 'no' | 'void' (void returns every
+  // stake in full). Runs inside a transaction.
+  function settle(marketId, outcome) {
+    for (const order of q("SELECT * FROM orders WHERE market_id = ? AND status = 'open'").all(marketId)) {
+      cancelRow(order);
+    }
+    let fees = 0;
+    for (const p of q('SELECT * FROM positions WHERE market_id = ?').all(marketId)) {
+      const cost = p.yes_cost + p.no_cost;
+      const payout = outcome === 'void' ? cost : 100 * (outcome === 'yes' ? p.yes_qty : p.no_qty);
+      const fee = feeOn(payout - cost);
+      adjust(p.user_id, payout - fee, outcome === 'void' ? 'void_refund' : 'payout', marketId);
+      q('UPDATE positions SET payout = ?, fee = ? WHERE market_id = ? AND user_id = ?')
+        .run(payout, fee, marketId, p.user_id);
+      fees += fee;
+    }
+    if (fees > 0) {
+      q('INSERT INTO ledger (user_id, market_id, type, amount, created_at) VALUES (NULL,?,?,?,?)')
+        .run(marketId, 'fee', fees, now());
+    }
+    q('UPDATE markets SET status = ?, outcome = ?, resolved_at = ? WHERE id = ?').run(
+      outcome === 'void' ? 'voided' : 'resolved',
+      outcome === 'void' ? null : outcome,
+      now(),
+      marketId,
+    );
+    return { market: getMarket(marketId), fees };
+  }
+
+  const OUTCOMES = ['yes', 'no', 'void'];
+
+  // The market's creator reports the result. Trading stops, and traders have
+  // DISPUTE_WINDOW_MS to dispute before it pays out.
+  function proposeResolution(userId, marketId, outcome) {
+    if (!OUTCOMES.includes(outcome)) throw new ApiError(400, 'Invalid outcome');
+    return tx(() => {
+      const m = q('SELECT * FROM markets WHERE id = ?').get(marketId);
+      if (!m) throw new ApiError(404, 'Market not found');
+      if (m.creator_id !== userId) throw new ApiError(403, 'Only the market’s creator can report the result');
+      if (m.status !== 'open') throw new ApiError(400, 'A result has already been reported');
+      for (const order of q("SELECT * FROM orders WHERE market_id = ? AND status = 'open'").all(marketId)) {
+        cancelRow(order);
+      }
+      q("UPDATE markets SET status = 'proposed', proposed_outcome = ?, proposed_at = ? WHERE id = ?")
+        .run(outcome, now(), marketId);
+      return { market: getMarket(marketId) };
+    });
+  }
+
+  // Any trader with a stake can dispute a reported result inside the window.
+  // A disputed market waits for an admin.
+  function disputeResolution(userId, marketId, reason) {
+    reason = String(reason ?? '').trim();
+    if (reason.length < 10 || reason.length > 1000) {
+      throw new ApiError(400, 'Explain the dispute in 10-1000 characters');
+    }
+    return tx(() => {
+      const m = q('SELECT * FROM markets WHERE id = ?').get(marketId);
+      if (!m) throw new ApiError(404, 'Market not found');
+      if (m.status !== 'proposed' || now() >= m.proposed_at + DISPUTE_WINDOW_MS) {
+        throw new ApiError(400, 'This result can no longer be disputed');
+      }
+      const p = q('SELECT * FROM positions WHERE market_id = ? AND user_id = ?').get(marketId, userId);
+      if (!p || p.yes_qty + p.no_qty === 0) throw new ApiError(403, 'Only traders in this market can dispute');
+      q("UPDATE markets SET status = 'disputed', dispute_reason = ?, disputed_by = ? WHERE id = ?")
+        .run(reason, userId, marketId);
+      return { market: getMarket(marketId) };
+    });
+  }
+
+  // Pays out every reported result whose dispute window has passed.
+  function finalizeDue() {
+    const due = q("SELECT id, proposed_outcome FROM markets WHERE status = 'proposed' AND proposed_at + ? <= ?")
+      .all(DISPUTE_WINDOW_MS, now());
+    for (const m of due) tx(() => settle(m.id, m.proposed_outcome));
+  }
+
+  // Admin decision: settles a disputed market, or steps in on any unsettled one.
   function resolveMarket(adminId, marketId, outcome) {
-    if (!['yes', 'no', 'void'].includes(outcome)) throw new ApiError(400, 'Invalid outcome');
+    if (!OUTCOMES.includes(outcome)) throw new ApiError(400, 'Invalid outcome');
     return tx(() => {
       if (!getUser(adminId)?.isAdmin) throw new ApiError(403, 'Only an admin can resolve markets');
       const m = q('SELECT * FROM markets WHERE id = ?').get(marketId);
       if (!m) throw new ApiError(404, 'Market not found');
-      if (m.status !== 'open') throw new ApiError(400, 'Market is already settled');
-
-      for (const order of q("SELECT * FROM orders WHERE market_id = ? AND status = 'open'").all(marketId)) {
-        cancelRow(order);
-      }
-      let fees = 0;
-      for (const p of q('SELECT * FROM positions WHERE market_id = ?').all(marketId)) {
-        const cost = p.yes_cost + p.no_cost;
-        const payout = outcome === 'void' ? cost : 100 * (outcome === 'yes' ? p.yes_qty : p.no_qty);
-        const fee = feeOn(payout - cost);
-        adjust(p.user_id, payout - fee, outcome === 'void' ? 'void_refund' : 'payout', marketId);
-        q('UPDATE positions SET payout = ?, fee = ? WHERE market_id = ? AND user_id = ?')
-          .run(payout, fee, marketId, p.user_id);
-        fees += fee;
-      }
-      if (fees > 0) {
-        q('INSERT INTO ledger (user_id, market_id, type, amount, created_at) VALUES (NULL,?,?,?,?)')
-          .run(marketId, 'fee', fees, now());
-      }
-      q('UPDATE markets SET status = ?, outcome = ?, resolved_at = ? WHERE id = ?').run(
-        outcome === 'void' ? 'voided' : 'resolved',
-        outcome === 'void' ? null : outcome,
-        now(),
-        marketId,
-      );
-      return { market: getMarket(marketId), fees };
+      if (m.status === 'resolved' || m.status === 'voided') throw new ApiError(400, 'Market is already settled');
+      return settle(marketId, outcome);
     });
+  }
+
+  function reportMarket(userId, marketId, reason) {
+    reason = String(reason ?? '').trim();
+    if (reason.length < 5 || reason.length > 1000) throw new ApiError(400, 'Say what is wrong in 5-1000 characters');
+    getMarket(marketId);
+    q(`INSERT INTO reports (market_id, user_id, reason, created_at) VALUES (?,?,?,?)
+       ON CONFLICT (market_id, user_id) DO UPDATE SET reason = excluded.reason, created_at = excluded.created_at`)
+      .run(marketId, userId, reason, now());
   }
 
   // ---------- reporting ----------
 
   function portfolio(userId) {
+    finalizeDue();
     const positions = q(
       `${MARKET_SELECT} JOIN positions p ON p.market_id = m.id WHERE p.user_id = ? ORDER BY m.id DESC`,
     ).all(userId).map((m) => ({
@@ -488,6 +582,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   // Where every cent is. `deposits` must always equal the sum of the rest:
   // the platform holds customer money and its own fees, and nothing else.
   function stats() {
+    finalizeDue();
     const one = (sql) => q(sql).get().n ?? 0;
     const s = {
       deposits: one("SELECT SUM(amount) AS n FROM ledger WHERE type = 'deposit'"),
@@ -495,7 +590,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
       orderEscrow: one("SELECT SUM(remaining * price) AS n FROM orders WHERE status = 'open'"),
       positionEscrow: one(
         `SELECT SUM(p.yes_cost + p.no_cost) AS n FROM positions p
-         JOIN markets m ON m.id = p.market_id WHERE m.status = 'open'`,
+         JOIN markets m ON m.id = p.market_id WHERE m.status IN ('open','proposed','disputed')`,
       ),
       feeRevenue: one("SELECT SUM(amount) AS n FROM ledger WHERE type = 'fee'"),
       users: one('SELECT COUNT(*) AS n FROM users'),
@@ -506,6 +601,13 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
     s.awaitingResolution = q(
       `${MARKET_SELECT} WHERE m.status = 'open' AND m.closes_at <= ? ORDER BY m.closes_at`,
     ).all(now()).map(marketView);
+    s.disputed = q(`${MARKET_SELECT} WHERE m.status = 'disputed' ORDER BY m.id`).all().map(marketView);
+    s.proposed = q(`${MARKET_SELECT} WHERE m.status = 'proposed' ORDER BY m.proposed_at`).all().map(marketView);
+    s.reports = q(
+      `SELECT r.market_id AS marketId, m.question, r.reason, r.created_at AS at, u.username AS reporter
+       FROM reports r JOIN markets m ON m.id = r.market_id JOIN users u ON u.id = r.user_id
+       WHERE m.status NOT IN ('resolved','voided') ORDER BY r.created_at DESC LIMIT 100`,
+    ).all();
     s.feesByMarket = q(
       `SELECT l.market_id AS marketId, m.question, l.amount FROM ledger l
        JOIN markets m ON m.id = l.market_id WHERE l.type = 'fee' ORDER BY l.id DESC LIMIT 50`,
@@ -516,6 +618,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   return {
     db, demo, register, login, logout, userForToken, getUser, faucet,
     createMarket, getMarket, listMarkets, marketDetail,
-    placeOrder, cancelOrder, resolveMarket, portfolio, stats,
+    placeOrder, cancelOrder, proposeResolution, disputeResolution, resolveMarket, reportMarket,
+    portfolio, stats,
   };
 }

@@ -139,3 +139,13 @@ td.r, th.r { text-align: right; }
 }
 #toast.show { opacity: 1; }
 #toast.error { background: var(--no); color: #fff; }
+
+.check { display: flex; gap: 10px; align-items: flex-start; color: var(--text); font-size: 14px; }
+.check input { width: auto; margin-top: 3px; flex: none; }
+.rule-list { margin: 0 0 10px; padding-left: 20px; display: grid; gap: 6px; }
+.report { margin-top: 14px; }
+.report summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.report form { margin-top: 12px; }
+.terms { max-width: 720px; }
+.terms h2 { margin-top: 22px; }
+.terms p { max-width: 65ch; }

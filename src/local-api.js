@@ -41,11 +41,13 @@ const EXAMPLES = [
   },
 ];
 const TRADERS = ['maya_trades', 'ken_quant', 'pri_sharpe', 'dev_odds'];
+const CREATOR = 'lena_asks'; // creates the examples; creators never trade their own markets
 
 export function seedExamples(engine, now = Date.now()) {
   const bots = TRADERS.map((name) => engine.createExampleUser(name));
+  const creator = engine.createExampleUser(CREATOR);
   EXAMPLES.forEach((ex, i) => {
-    const m = engine.createMarket(bots[i % bots.length].id, {
+    const m = engine.createMarket(creator.id, {
       question: ex.question, description: ex.description, category: ex.category,
       closesAt: now + ex.days * DAY,
     });
@@ -86,7 +88,7 @@ export function createLocalApi({ storage = globalThis.localStorage, now } = {}) 
   route('GET', '/config', () => ({ feeBps: FEE_BPS, categories: CATEGORIES, demo: true, local: true }));
   route('GET', '/me', ({ user }) => ({ user }));
   route('POST', '/register', async ({ body }) => {
-    const { user, token: t } = await engine.register(body.username, body.password);
+    const { user, token: t } = await engine.register(body.username, body.password, body.agree === true || body.agree === 'on');
     setToken(t);
     return { user };
   });
@@ -116,6 +118,9 @@ export function createLocalApi({ storage = globalThis.localStorage, now } = {}) 
   route('POST', '/markets', ({ user, body }) => ({ market: engine.createMarket(user.id, body) }), true);
   route('GET', '/markets/:id', ({ user, id }) => engine.marketDetail(id, user?.id));
   route('POST', '/markets/:id/orders', ({ user, id, body }) => engine.placeOrder(user.id, id, body), true);
+  route('POST', '/markets/:id/propose', ({ user, id, body }) => engine.proposeResolution(user.id, id, body.outcome), true);
+  route('POST', '/markets/:id/dispute', ({ user, id, body }) => engine.disputeResolution(user.id, id, body.reason), true);
+  route('POST', '/markets/:id/report', ({ user, id, body }) => engine.reportMarket(user.id, id, body.reason) ?? {}, true);
   route('POST', '/markets/:id/resolve', ({ user, id, body }) => engine.resolveMarket(user.id, id, body.outcome), true);
   route('DELETE', '/orders/:id', ({ user, id }) => engine.cancelOrder(user.id, id) ?? {}, true);
   route('GET', '/portfolio', ({ user }) => engine.portfolio(user.id), true);

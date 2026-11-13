@@ -48,6 +48,7 @@ function renderNav() {
   nav.innerHTML = `
     ${link('#/', 'Markets')}
     ${link('#/create', 'Create market')}
+    ${link('#/terms', 'How it works')}
     ${u ? link('#/portfolio', 'Portfolio') : ''}
     ${u?.isAdmin ? link('#/admin', 'Admin') : ''}
     <span class="spacer"></span>
@@ -61,8 +62,15 @@ function renderNav() {
 function statusBadge(m) {
   if (m.status === 'resolved') return `<span class="badge ${m.outcome}">Resolved ${m.outcome.toUpperCase()}</span>`;
   if (m.status === 'voided') return '<span class="badge">Voided</span>';
-  if (m.status === 'closed') return '<span class="badge warn">Awaiting resolution</span>';
+  if (m.status === 'closed') return '<span class="badge warn">Waiting for result</span>';
+  if (m.status === 'proposed') return `<span class="badge warn">Reported ${m.proposedOutcome === 'void' ? 'void' : m.proposedOutcome.toUpperCase()}</span>`;
+  if (m.status === 'disputed') return '<span class="badge no">Disputed</span>';
   return '<span class="badge">Open</span>';
+}
+
+function closeLabel(m) {
+  if (m.status === 'open') return `Closes ${date(m.closesAt)}`;
+  return m.closesAt > Date.now() ? 'Trading stopped early' : `Closed ${date(m.closesAt)}`;
 }
 
 // Best estimate of the YES price: last trade, else the middle of the book.
@@ -87,13 +95,14 @@ async function marketsPage() {
   view.innerHTML = `
     <div class="hero">
       <h1>Trade on what happens next</h1>
-      <p>Anyone can open a market. You trade against other people, never against the house:
-      every contract pays $1.00 to the side that is right. We keep ${feePct()} of your profit, and nothing when you lose.</p>
+      <p>Crowdline is a marketplace. Members create markets, trade with each other, and each market’s creator
+      reports the result. We never take a side: every contract pays $1.00 to the side that is right, funded by the other side.
+      We keep ${feePct()} of your profit, and nothing when you lose. <a class="yes" href="#/terms">How it works</a></p>
     </div>
     <div class="filters">
       <input id="search" type="search" placeholder="Search markets" value="${esc(f.q)}">
       <div class="chips">
-        ${chip('status', 'open', 'Open')}${chip('status', 'closed', 'Awaiting resolution')}${chip('status', 'settled', 'Settled')}
+        ${chip('status', 'open', 'Open')}${chip('status', 'closed', 'Waiting for result')}${chip('status', 'settled', 'Settled')}
       </div>
     </div>
     <div class="filters chips">
@@ -117,7 +126,7 @@ function card(m) {
       <div class="bar"><div style="width:${p ?? 0}%"></div></div>
       <div class="row muted small">
         <span>${m.volume.toLocaleString()} contracts traded</span>
-        <span>${m.status === 'open' ? `Closes ${date(m.closesAt)}` : `Closed ${date(m.closesAt)}`}</span>
+        <span>${closeLabel(m)}</span>
       </div>
     </a>`;
 }
@@ -133,6 +142,7 @@ async function marketPage(id) {
     state.ticket = { marketId: m.id, side: 'yes', qty: 10, price: bestNo ? 100 - bestNo : m.lastPrice ?? 50 };
   }
   const p = impliedPrice({ ...m, yesBid: bestYes, yesAsk: bestNo ? 100 - bestNo : null });
+  const isCreator = state.user?.id === m.creatorId;
 
   view.innerHTML = `
     <div class="detail">
@@ -141,7 +151,7 @@ async function marketPage(id) {
         <h1>${esc(m.question)}</h1>
         <div class="meta">
           ${statusBadge(m)}
-          <span>${m.status === 'open' ? 'Closes' : 'Closed'} ${date(m.closesAt)}</span>
+          <span>${closeLabel(m)}</span>
           <span>${m.volume.toLocaleString()} contracts traded</span>
           <span>Created by ${esc(m.creator)}</span>
         </div>
@@ -160,6 +170,17 @@ async function marketPage(id) {
         <div class="panel">
           <h2>How this resolves</h2>
           <div class="rules">${esc(m.description)}</div>
+          <p class="muted small" style="margin:12px 0 0">${esc(m.creator)} created this market and reports its result.
+          Traders then have ${DISPUTE_HOURS} hours to dispute it before it pays out.</p>
+          ${state.user && !isCreator ? `
+            <details class="report">
+              <summary>Report this market</summary>
+              <form data-form="report">
+                <label>What breaks the rules?<textarea id="report-reason" name="reason" required minlength="5" maxlength="1000"
+                  placeholder="For example: it bets on someone’s death, targets a private person, or has no way to check the result."></textarea></label>
+                <button>Send report</button>
+              </form>
+            </details>` : ''}
         </div>
         <div class="panel">
           <h2>Recent trades</h2>
@@ -170,13 +191,16 @@ async function marketPage(id) {
         </div>
       </div>
       <div>
+        ${resultPanel(d, isCreator)}
         ${m.status === 'open' ? '<div class="panel" id="ticket"></div>' : ''}
         ${positionPanel(d)}
         ${ordersPanel(d)}
-        ${state.user?.isAdmin && (m.status === 'open' || m.status === 'closed') ? `
+        ${state.user?.isAdmin && !['resolved', 'voided'].includes(m.status) ? `
           <div class="panel">
-            <h2>Resolve market</h2>
-            <p class="muted small">Pays out every position and cancels open orders. This cannot be undone.</p>
+            <h2>Admin decision</h2>
+            <p class="muted small">${m.status === 'disputed'
+              ? 'A trader disputed the reported result. Your decision pays out every position and is final.'
+              : 'Normally the creator reports the result. Step in only for a dispute, a rules violation or an absent creator. This pays out immediately and cannot be undone.'}</p>
             <div class="actions">
               <button class="buy-yes" data-action="resolve" data-outcome="yes">YES</button>
               <button class="buy-no" data-action="resolve" data-outcome="no">NO</button>
@@ -186,6 +210,49 @@ async function marketPage(id) {
       </div>
     </div>`;
   renderTicket();
+}
+
+const DISPUTE_HOURS = 24;
+const outcomeWord = (o) => (o === 'void' ? 'Void (refund everyone)' : o.toUpperCase());
+
+// Who reports the result, and how traders can challenge it.
+function resultPanel(d, isCreator) {
+  const m = d.market;
+  const hasStake = d.position && d.position.yesQty + d.position.noQty > 0;
+  if (m.status === 'proposed') {
+    return `<div class="panel">
+      <h2>Reported result</h2>
+      <p><b>${outcomeWord(m.proposedOutcome)}</b>, reported by ${esc(m.creator)}.
+      It pays out ${date(m.finalizesAt)} unless a trader disputes it first.</p>
+      ${state.user && hasStake && !isCreator ? `
+        <form data-form="dispute">
+          <label>Think it’s wrong? Explain why, with a source.
+            <textarea id="dispute-reason" name="reason" required minlength="10" maxlength="1000"></textarea></label>
+          <button class="buy-no">Dispute result</button>
+        </form>` : ''}
+    </div>`;
+  }
+  if (m.status === 'disputed') {
+    return `<div class="panel">
+      <h2>Result disputed</h2>
+      <p>${esc(m.creator)} reported <b>${outcomeWord(m.proposedOutcome)}</b>. A trader disputed it:</p>
+      <p class="rules muted">${esc(m.disputeReason)}</p>
+      <p class="muted small">An admin will review the dispute and decide. Stakes stay held until then.</p>
+    </div>`;
+  }
+  if (isCreator && (m.status === 'open' || m.status === 'closed')) {
+    return `<div class="panel">
+      <h2>Report the result</h2>
+      <p class="muted small">You created this market, so you report what happened, following its rules.
+      Trading stops when you report. Traders get ${DISPUTE_HOURS} hours to dispute before anything pays out.</p>
+      <div class="actions">
+        <button class="buy-yes" data-action="propose" data-outcome="yes">YES</button>
+        <button class="buy-no" data-action="propose" data-outcome="no">NO</button>
+        <button data-action="propose" data-outcome="void">Void and refund</button>
+      </div>
+    </div>`;
+  }
+  return '';
 }
 
 function bookSide(side, levels) {
@@ -218,6 +285,11 @@ function renderTicket() {
   if (!state.user) {
     el.innerHTML = `<h2>Trade</h2><p class="muted">Log in to place an order.</p>
       <a class="btn primary" href="#/login">Log in</a>`;
+    return;
+  }
+  if (state.user.id === state.detail.market.creatorId) {
+    el.innerHTML = `<h2>Trade</h2><p class="muted">You created this market, so you can’t trade in it.
+      Creators report the result, and keeping them out of the trading removes the reason to report it wrongly.</p>`;
     return;
   }
   const t = state.ticket;
@@ -296,7 +368,18 @@ function createPage() {
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   view.innerHTML = `
     <h1>Create a market</h1>
-    <p class="muted">Ask a yes-or-no question with an outcome anyone can check.</p>
+    <p class="muted">Ask a yes-or-no question with an outcome anyone can check. As the creator you report the result,
+    and you can’t trade in your own market.</p>
+    <div class="panel form">
+      <h2>Market rules</h2>
+      <ul class="rule-list">
+        <li>The result must be public and checkable. Name the source that decides it.</li>
+        <li>No markets on anyone’s death, injury or safety, or on violence, terrorism, war casualties or crimes.</li>
+        <li>No markets about private individuals or anyone under 18.</li>
+        <li>No markets you or a friend can decide or influence.</li>
+      </ul>
+      <p class="muted small">Markets that break these rules are voided and every stake is refunded.</p>
+    </div>
     <form class="panel form" data-form="create">
       <label>Question
         <input name="question" required minlength="10" maxlength="200" placeholder="Will ... happen by ...?">
@@ -313,6 +396,8 @@ function createPage() {
           <input name="closesAt" type="datetime-local" required value="${d.toISOString().slice(0, 16)}">
         </label>
       </div>
+      <label class="check"><input type="checkbox" id="create-agree" name="agree" required>
+        <span>This market follows the rules, and I’ll report its result honestly, using the source above.</span></label>
       <button class="primary">Create market</button>
     </form>`;
 }
@@ -327,6 +412,8 @@ function authPage(mode) {
       <p class="muted">${signup && state.config.demo ? 'New accounts start with $1,000.00 in demo credits.' : '&nbsp;'}</p>
       <label>Username<input name="username" required autocomplete="username" minlength="3" maxlength="20"></label>
       <label>Password<input name="password" type="password" required minlength="8" autocomplete="${signup ? 'new-password' : 'current-password'}"></label>
+      ${signup ? `<label class="check"><input type="checkbox" id="signup-agree" name="agree" required>
+        <span>I am 18 or older and agree to the <a class="yes" href="#/terms" target="_blank">marketplace terms</a>.</span></label>` : ''}
       <button class="primary wide">${signup ? 'Sign up' : 'Log in'}</button>
       <p class="muted small" style="margin-top:14px">${signup
         ? 'Already have an account? <a class="yes" href="#/login">Log in</a>'
@@ -421,16 +508,67 @@ async function adminPage() {
       </div>
       <span class="badge ${s.balanced ? 'yes' : 'no'}">${s.balanced ? 'Books balance: every payout is fully funded by traders' : 'Books do not balance'}</span>
     </div>
-    <div class="panel scroll"><h2>Awaiting resolution</h2>
+    <div class="panel scroll"><h2>Disputed results</h2>
+      ${s.disputed.length ? `<table>${s.disputed.map((m) => `<tr>
+        <td><a href="#/m/${m.id}">${esc(m.question)}</a><div class="muted small">${esc(m.disputeReason)}</div></td>
+        <td class="r">Reported ${outcomeWord(m.proposedOutcome)}</td></tr>`).join('')}</table>`
+        : '<div class="muted">No disputes to decide.</div>'}
+    </div>
+    <div class="panel scroll"><h2>Reported markets</h2>
+      ${s.reports.length ? `<table>${s.reports.map((r) => `<tr>
+        <td><a href="#/m/${r.marketId}">${esc(r.question)}</a><div class="muted small">${esc(r.reason)}</div></td>
+        <td class="r muted">${esc(r.reporter)} · ${date(r.at)}</td></tr>`).join('')}</table>`
+        : '<div class="muted">No open reports.</div>'}
+    </div>
+    <div class="panel scroll"><h2>Results in their dispute window</h2>
+      ${s.proposed.length ? `<table>${s.proposed.map((m) => `<tr>
+        <td><a href="#/m/${m.id}">${esc(m.question)}</a></td>
+        <td class="r">${outcomeWord(m.proposedOutcome)} · pays out ${date(m.finalizesAt)}</td></tr>`).join('')}</table>`
+        : '<div class="muted">None right now.</div>'}
+    </div>
+    <div class="panel scroll"><h2>Closed, waiting for the creator</h2>
       ${s.awaitingResolution.length ? `<table>${s.awaitingResolution.map((m) => `<tr>
-        <td><a href="#/m/${m.id}">${esc(m.question)}</a></td><td class="r muted">Closed ${date(m.closesAt)}</td></tr>`).join('')}</table>`
-        : '<div class="muted">Nothing is waiting. You can also resolve a market early from its page.</div>'}
+        <td><a href="#/m/${m.id}">${esc(m.question)}</a></td><td class="r muted">${esc(m.creator)} · closed ${date(m.closesAt)}</td></tr>`).join('')}</table>`
+        : '<div class="muted">Every closed market has a reported result.</div>'}
     </div>
     <div class="panel scroll"><h2>Fees by market</h2>
       ${s.feesByMarket.length ? `<table>${s.feesByMarket.map((f) => `<tr>
         <td><a href="#/m/${f.marketId}">${esc(f.question)}</a></td><td class="r num">${money(f.amount)}</td></tr>`).join('')}</table>`
         : '<div class="muted">No fees collected yet.</div>'}
     </div>`;
+}
+
+// ---------- terms ----------
+
+function termsPage() {
+  view.innerHTML = `
+    <article class="panel terms">
+      <h1>How Crowdline works</h1>
+      <p class="muted">These terms describe the marketplace. They are a starting point, not legal advice.</p>
+      <h2>Crowdline is a venue, not a party to your trades</h2>
+      <p>Members create markets and trade with each other. Every trade is between two members: one buys YES,
+      the other buys NO, and together their payments fund the $1.00 that each contract pays the winner.
+      Crowdline never buys or sells contracts, never takes the other side of a trade, and doesn’t set prices.</p>
+      <h2>Our fee</h2>
+      <p>When a market settles, we keep ${feePct()} of each member’s net profit in that market. Net profit is what the
+      market paid you minus everything you paid for contracts in it. If you lose or break even, you pay no fee.</p>
+      <h2>Who decides the result</h2>
+      <p>The member who created a market reports its result, following the rules written in the market.
+      Creators can’t trade in their own markets. After a result is reported, trading stops and traders have
+      ${DISPUTE_HOURS} hours to dispute it. An undisputed result then pays out automatically. A disputed result is
+      reviewed by a Crowdline admin, whose decision is final. Admins can also void a market that breaks the
+      rules or has no reported result, which refunds every stake.</p>
+      <h2>Market rules</h2>
+      <p>No markets on anyone’s death, injury or safety; on violence, terrorism, war casualties or crimes; about private
+      individuals or anyone under 18; or on anything the creator can decide or influence. Report markets that break these rules.</p>
+      <h2>Your money</h2>
+      <p>When you place an order, its full cost is set aside from your balance until it fills or you cancel it.
+      Money in open positions is held until the market settles. ${state.config.local || state.config.demo
+        ? 'Right now all balances are play money with no cash value: you can’t buy credits or withdraw them.' : ''}</p>
+      <h2>Eligibility and conduct</h2>
+      <p>You must be 18 or older. Don’t trade on information you got in confidence, manipulate the event a market
+      is about, or use more than one account.</p>
+    </article>`;
 }
 
 // ---------- routing and events ----------
@@ -446,6 +584,7 @@ async function render() {
     else if (hash === '#/signup') authPage('signup');
     else if (hash === '#/portfolio') await portfolioPage();
     else if (hash === '#/admin') await adminPage();
+    else if (hash === '#/terms') termsPage();
     else await marketsPage();
   } catch (err) {
     view.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
@@ -479,7 +618,14 @@ const actions = {
     const label = outcome === 'void' ? 'void this market and refund everyone' : `resolve this market ${outcome.toUpperCase()}`;
     if (!confirm(`Really ${label}? This cannot be undone.`)) return;
     const { fees } = await api(`/markets/${state.detail.market.id}/resolve`, { method: 'POST', body: { outcome } });
-    toast(outcome === 'void' ? 'Market voided' : `Market resolved. Fees collected: ${money(fees)}`);
+    toast(outcome === 'void' ? 'Market voided, stakes refunded' : `Market settled. Fees collected: ${money(fees)}`);
+    render();
+  },
+  async propose(el) {
+    const outcome = el.dataset.outcome;
+    if (!confirm(`Report the result as ${outcomeWord(outcome)}? Trading stops now, and traders get ${DISPUTE_HOURS} hours to dispute it.`)) return;
+    await api(`/markets/${state.detail.market.id}/propose`, { method: 'POST', body: { outcome } });
+    toast('Result reported. It pays out after the dispute window.');
     render();
   },
   async resetDemo() {
@@ -510,6 +656,16 @@ const forms = {
     });
     toast('Market created');
     location.hash = `#/m/${market.id}`;
+  },
+  async dispute(data) {
+    await api(`/markets/${state.detail.market.id}/dispute`, { method: 'POST', body: data });
+    toast('Dispute sent. An admin will decide.');
+    render();
+  },
+  async report(data) {
+    await api(`/markets/${state.detail.market.id}/report`, { method: 'POST', body: data });
+    toast('Report sent to the admins');
+    render();
   },
   async login(data) {
     state.user = (await api('/login', { method: 'POST', body: data })).user;
