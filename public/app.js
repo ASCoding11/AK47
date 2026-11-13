@@ -1,4 +1,4 @@
-import { request } from './transport.js';
+import { request, watch } from './transport.js';
 
 const view = document.getElementById('view');
 const nav = document.getElementById('nav');
@@ -751,12 +751,12 @@ function adSlot(name) {
   const ads = state.config.ads ?? {};
   const slot = ads.slots?.[name];
   if (ads.client && slot) {
-    return `<div class="ad ad-${name}"><span class="ad-label">Advertisement</span>
+    return `<div class="ad ad-${name}" data-ad-name="${name}"><span class="ad-label">Advertisement</span>
       <ins class="adsbygoogle" style="display:block" data-ad-client="${esc(ads.client)}" data-ad-slot="${esc(slot)}"
         data-ad-format="auto" data-full-width-responsive="true"></ins></div>`;
   }
   if (!ads.client && ads.showPlaceholders) {
-    return `<div class="ad ad-${name} ad-placeholder"><span class="ad-label">Ad space</span></div>`;
+    return `<div class="ad ad-${name} ad-placeholder" data-ad-name="${name}"><span class="ad-label">Ad space</span></div>`;
   }
   return '';
 }
@@ -802,12 +802,56 @@ function privacyPage() {
 
 // ---------- routing and events ----------
 
+// ---------- live updates ----------
+
+let stopWatching = null;
+
+// Re-renders the current page when someone else changes it (a new market, a
+// bet, a match). Waits while you're typing, and keeps the ads already on the
+// page so they don't reload on their own.
+function liveRefresh(target, rerender) {
+  stopWatching?.();
+  stopWatching = null;
+  if (!watch) return;
+  const hashNow = location.hash;
+  let timer;
+  const run = async () => {
+    if (location.hash !== hashNow) return;
+    const active = document.activeElement;
+    if (active && view.contains(active) && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) && active.id !== 'search') {
+      timer = setTimeout(run, 2000);
+      return;
+    }
+    const ads = new Map([...view.querySelectorAll('[data-ad-name]')].map((el) => [el.dataset.adName, el]));
+    try {
+      await refreshUser();
+      await rerender();
+    } catch {
+      return;
+    }
+    for (const el of view.querySelectorAll('[data-ad-name]')) {
+      const old = ads.get(el.dataset.adName);
+      if (old && old !== el) el.replaceWith(old);
+    }
+    fillAds();
+  };
+  stopWatching = watch(target, () => {
+    clearTimeout(timer);
+    timer = setTimeout(run, 300);
+  });
+}
+
 async function render() {
+  stopWatching?.();
+  stopWatching = null;
   await refreshUser().catch(() => renderNav());
   const hash = location.hash || '#/';
   const market = /^#\/m\/([A-Za-z0-9_-]{1,64})$/.exec(hash);
   try {
-    if (market) await marketPage(market[1]);
+    if (market) {
+      await marketPage(market[1]);
+      liveRefresh(`market:${market[1]}`, () => marketPage(market[1]));
+    }
     else if (hash === '#/create') createPage();
     else if (hash === '#/login') authPage('login');
     else if (hash === '#/signup') authPage('signup');
@@ -816,7 +860,18 @@ async function render() {
     else if (hash === '#/terms') termsPage();
     else if (hash === '#/privacy') privacyPage();
     else if (hash === '#/signin') signInPage();
-    else await marketsPage();
+    else {
+      await marketsPage();
+      liveRefresh('markets', async () => {
+        const searching = document.activeElement?.id === 'search';
+        await marketsPage();
+        if (searching) {
+          const input = document.getElementById('search');
+          input.focus();
+          input.setSelectionRange(input.value.length, input.value.length);
+        }
+      });
+    }
   } catch (err) {
     view.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
   }

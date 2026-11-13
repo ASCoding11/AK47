@@ -7,3 +7,5 @@ const shared = signInMode(SITE_CONFIG) === 'firebase' && SITE_CONFIG.firebase.sh
 const impl = shared ? await import('./firebase-transport.js') : await import('./local-transport.js');
 
 export const request = (method, path, body) => impl.request(method, path, body);
+// Live updates, where the backend supports them (shared Firebase markets).
+export const watch = impl.watch ?? null;

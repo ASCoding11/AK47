@@ -19,9 +19,10 @@ export const SITE_CONFIG = {
     storageBucket: 'crowdline-243a7.firebasestorage.app',
     messagingSenderId: '488845118165',
     appId: '1:488845118165:web:b6c82c9082d056159ef05c',
-    // Turn on once the Cloud Functions are deployed (see README): everyone then
-    // shares the same markets. While false, each browser keeps its own copy.
-    sharedMarkets: false,
+    // Everyone shares the same markets, stored in Firestore. Needs the Firestore
+    // database created and firestore.rules published (see README). While
+    // false, each browser keeps its own private copy.
+    sharedMarkets: true,
   },
 
   // Google AdSense. `client` is your publisher ID, e.g. 'ca-pub-1234567890123456'.

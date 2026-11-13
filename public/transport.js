@@ -10,3 +10,6 @@ export async function request(method, path, body) {
   if (!res.ok) throw new Error(data.error ?? 'Request failed');
   return data;
 }
+
+// The Node server has no live updates; pages refresh when you navigate.
+export const watch = null;

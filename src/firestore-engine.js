@@ -28,7 +28,12 @@ export const feeOn = (profit) => (profit > 0 ? Math.floor((profit * FEE_BPS) / 1
 const ms = (t) => (t == null ? null : typeof t === 'number' ? t : t.toMillis());
 
 export function createFirestoreEngine({ sdk, db, now = () => Date.now() }) {
-  const { doc, collection, getDoc, getDocs, query, where, runTransaction, writeBatch, serverTimestamp, increment } = sdk;
+  const { doc, collection, query, where, runTransaction, writeBatch, serverTimestamp, increment } = sdk;
+  // Always read from the server. Firestore otherwise answers from its local
+  // cache when it can't reach the database, which shows an empty site instead
+  // of an error (for example before the database has been created).
+  const getDoc = sdk.getDocFromServer;
+  const getDocs = sdk.getDocsFromServer;
   const ref = (path) => doc(db, path);
   // Every query filters on a single field, so Firestore never needs a
   // hand-made composite index.
@@ -436,7 +441,27 @@ export function createFirestoreEngine({ sdk, db, now = () => Date.now() }) {
     return s;
   }
 
+  // Calls `onChange` whenever someone else changes what a page shows, so new
+  // markets and bets appear live. 'markets' watches the market list;
+  // 'market:<id>' watches one market, its bets and its matches.
+  function watch(target, onChange) {
+    const stops = [];
+    const listen = (source) => {
+      let first = true;
+      stops.push(sdk.onSnapshot(source, () => (first ? (first = false) : onChange()), () => {}));
+    };
+    if (target === 'markets') listen(collection(db, 'markets'));
+    else if (target.startsWith('market:')) {
+      const id = target.slice('market:'.length);
+      listen(ref(`markets/${id}`));
+      listen(query(collection(db, 'orders'), where('marketId', '==', id)));
+      listen(query(collection(db, 'fills'), where('marketId', '==', id)));
+    }
+    return () => stops.forEach((stop) => stop());
+  }
+
   return {
+    watch,
     me, join, createMarket, listMarkets, marketDetail, placeOrder, cancelOrder, match,
     proposeResolution, resolveMarket, reportMarket, portfolio, stats,
   };

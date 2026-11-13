@@ -28,6 +28,45 @@ async function loaded() {
   }
 }
 
+const SETUP_HINT = 'If Crowdline was just set up, check in the Firebase console that the Firestore database exists '
+  + '(Build → Firestore Database) and that Crowdline’s rules are published (Firestore Database → Rules).';
+
+// Firestore keeps retrying when the database is missing or unreachable, so
+// give up after a while with an explanation instead of spinning forever.
+function withTimeout(promise, ms = 15_000) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`Couldn’t reach Crowdline’s database. ${SETUP_HINT}`);
+      err.code = 'timeout';
+      reject(err);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function friendly(err) {
+  if (err instanceof ApiError || err.code === 'timeout') return err;
+  console.error(err);
+  if (err.code === 'permission-denied') return new Error(`That wasn’t allowed. ${SETUP_HINT}`);
+  if (err.code === 'not-found' || err.code === 'failed-precondition') return new Error(`Crowdline’s database isn’t ready. ${SETUP_HINT}`);
+  if (err.code === 'unavailable') return new Error(`Couldn’t reach Crowdline’s database. Check your connection and try again. ${SETUP_HINT}`);
+  return new Error('Something went wrong. Refresh the page and try again.');
+}
+
+// Live updates for the page being viewed (see the engine's `watch`).
+export function watch(target, onChange) {
+  let stop = null;
+  let cancelled = false;
+  ready.then(({ engine }) => {
+    if (!cancelled) stop = engine.watch(target, onChange);
+  }).catch(() => {});
+  return () => {
+    cancelled = true;
+    stop?.();
+  };
+}
+
 const routes = [];
 const route = (method, pattern, handler, auth = true) =>
   routes.push({ method, re: new RegExp(`^${pattern.replace(':id', '([A-Za-z0-9_-]{1,64})')}$`), handler, auth });
@@ -70,13 +109,9 @@ export async function request(method, path, body) {
     if (!match) continue;
     if (r.auth && !user) throw new Error('Sign in first');
     try {
-      return (await r.handler({ engine, uid: user?.uid ?? null, user, body: body ?? {}, query: url.searchParams, id: match[1] })) ?? {};
+      return (await withTimeout(r.handler({ engine, uid: user?.uid ?? null, user, body: body ?? {}, query: url.searchParams, id: match[1] }))) ?? {};
     } catch (err) {
-      if (err instanceof ApiError) throw err;
-      console.error(err);
-      if (err.code === 'permission-denied') throw new Error('That wasn’t allowed. Refresh the page and try again.');
-      if (err.code === 'unavailable') throw new Error('Couldn’t reach Crowdline’s database. Check your connection and try again.');
-      throw new Error('Something went wrong. Refresh the page and try again.');
+      throw friendly(err);
     }
   }
   throw new Error('Not found');
