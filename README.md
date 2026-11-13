@@ -75,6 +75,36 @@ accounts so it stays usable. Once it is set, new accounts come only from Google.
 Until `ads.client` is set, labelled "Ad space" boxes show where ads will go.
 Set `ads.showPlaceholders` to `false` to hide them.
 
+## Shared markets on Firebase
+
+With shared markets on, the GitHub Pages site stores every market, bet and
+balance in Firestore, and a Cloud Function (`functions/`) processes every
+request, so everyone sees the same markets and nobody can edit their balance.
+Browsers can't read or write the database directly (`firestore.rules`).
+
+One-time setup, in the [Firebase console](https://console.firebase.google.com/project/crowdline-243a7):
+
+1. **Upgrade to the Blaze plan** (Usage and billing → Details & settings →
+   Modify plan). Cloud Functions need it; a small site normally stays inside
+   the free monthly allowance. Add a budget alert while you're there.
+2. **Create the database**: Build → Firestore Database → Create database →
+   Start in production mode → location `nam5 (United States)`.
+3. **Deploy** from [Cloud Shell](https://shell.cloud.google.com/?show=terminal)
+   (nothing to install on your computer):
+
+   ```sh
+   git clone -b claude/confident-lovelace-o7r86g https://github.com/ASCoding11/AK47.git
+   cd AK47/functions && npm install && cd ..
+   npx -y firebase-tools@15.36.0 login --no-localhost
+   npx -y firebase-tools@15.36.0 deploy --only functions,firestore --project crowdline-243a7
+   ```
+
+4. Set `sharedMarkets: true` under `firebase` in `src/site-config.js`, run
+   `npm run build:pages`, and push. **Sign in straight away**: the first
+   member to sign in becomes the admin who verifies results.
+
+Redeploy (step 3, from `git pull`) whenever `functions/` changes.
+
 ## How the marketplace works
 
 - Each market has YES and NO contracts. A contract pays **1 Avenue** if its
@@ -108,7 +138,9 @@ the same through randomized trading.
 - `src/site-config.js`: Google sign-in and AdSense settings
 - `server.js`: HTTP API and static file server
 - `public/`: single-page web app
-- `test/engine.test.js`: tests, run against both engines
+- `functions/`: the shared Firestore engine and the `api` Cloud Function
+- `pages/`: how the GitHub Pages app reaches the exchange (shared or in-browser)
+- `test/`: tests for all three engines (server, in-browser, Firestore)
 
 ## Keep it play money
 

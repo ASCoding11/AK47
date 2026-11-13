@@ -5,15 +5,21 @@
 //   * A trade only happens when a YES buyer and a NO buyer agree on prices that
 //     sum to 100. Both sides pay up front, so every contract is backed by
 //     exactly 100 held in escrow. The platform never takes a position.
-//   * At settlement each winning contract pays its holder in full; there is no fee.
+//   * At settlement Crowdline keeps FEE_BPS of each member's net profit in that
+//     market (in Avenues). Losers and break-even members pay nothing.
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
+export const FEE_BPS = 1000; // 10% of winnings
 export const CATEGORIES = ['Politics', 'Sports', 'Economics', 'Tech', 'Culture', 'Science', 'Other'];
 // Balances are play money ("Avenues") in hundredths: 100 units = 1 Avenue,
 // and every contract pays 1 Avenue to the winning side.
 export const WELCOME_BONUS = 100_000; // 1,000 Avenues, once per account
 const MAX_QTY = 100_000;
+
+export function feeOn(profit) {
+  return profit > 0 ? Math.floor((profit * FEE_BPS) / 10_000) : 0;
+}
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -368,6 +374,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
         yesCost: p.yes_cost,
         noCost: p.no_cost,
         payout: p.payout,
+        fee: p.fee,
       }
     );
   }
@@ -471,11 +478,18 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
     for (const order of q("SELECT * FROM orders WHERE market_id = ? AND status = 'open'").all(marketId)) {
       cancelRow(order);
     }
+    let fees = 0;
     for (const p of q('SELECT * FROM positions WHERE market_id = ?').all(marketId)) {
       const cost = p.yes_cost + p.no_cost;
       const payout = outcome === 'void' ? cost : 100 * (outcome === 'yes' ? p.yes_qty : p.no_qty);
-      adjust(p.user_id, payout, outcome === 'void' ? 'void_refund' : 'payout', marketId);
-      q('UPDATE positions SET payout = ?, fee = 0 WHERE market_id = ? AND user_id = ?').run(payout, marketId, p.user_id);
+      const fee = feeOn(payout - cost);
+      adjust(p.user_id, payout - fee, outcome === 'void' ? 'void_refund' : 'payout', marketId);
+      q('UPDATE positions SET payout = ?, fee = ? WHERE market_id = ? AND user_id = ?').run(payout, fee, marketId, p.user_id);
+      fees += fee;
+    }
+    if (fees > 0) {
+      q('INSERT INTO ledger (user_id, market_id, type, amount, created_at) VALUES (NULL,?,?,?,?)')
+        .run(marketId, 'fee', fees, now());
     }
     q('UPDATE markets SET status = ?, outcome = ?, resolved_at = ? WHERE id = ?').run(
       outcome === 'void' ? 'voided' : 'resolved',
@@ -483,7 +497,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
       now(),
       marketId,
     );
-    return { market: getMarket(marketId) };
+    return { market: getMarket(marketId), fees };
   }
 
   const OUTCOMES = ['yes', 'no', 'void'];
@@ -554,7 +568,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   }
 
   // Where every cent is. `deposits` must always equal the sum of the rest:
-  // every Avenue given out is in a balance, an open order or an open position.
+  // every Avenue given out is in a balance, an open order, an open position or fees kept.
   function stats() {
     const one = (sql) => q(sql).get().n ?? 0;
     const s = {
@@ -565,7 +579,6 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
         `SELECT SUM(p.yes_cost + p.no_cost) AS n FROM positions p
          JOIN markets m ON m.id = p.market_id WHERE m.status IN ('open','proposed','disputed')`,
       ),
-      // Only an earlier version charged a fee; old databases may still hold some.
       feeRevenue: one("SELECT SUM(amount) AS n FROM ledger WHERE type = 'fee'"),
       users: one('SELECT COUNT(*) AS n FROM users'),
       markets: one('SELECT COUNT(*) AS n FROM markets'),
@@ -575,6 +588,10 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
     s.awaitingResolution = q(
       `${MARKET_SELECT} WHERE m.status = 'open' AND m.closes_at <= ? ORDER BY m.closes_at`,
     ).all(now()).map(marketView);
+    s.feesByMarket = q(
+      `SELECT l.market_id AS marketId, m.question, l.amount FROM ledger l
+       JOIN markets m ON m.id = l.market_id WHERE l.type = 'fee' ORDER BY l.id DESC LIMIT 50`,
+    ).all();
     // 'disputed' only exists in databases from the dispute-window version.
     s.proposed = q(`${MARKET_SELECT} WHERE m.status IN ('proposed','disputed') ORDER BY m.proposed_at`).all().map(marketView);
     s.reports = q(

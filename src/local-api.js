@@ -1,6 +1,6 @@
 // The server's HTTP API, answered in the browser by src/local-engine.js.
 // Used by the static GitHub Pages build, where there is no server.
-import { ApiError, CATEGORIES, createEngine } from './local-engine.js';
+import { ApiError, CATEGORIES, FEE_BPS, createEngine } from './local-engine.js';
 import { SITE_CONFIG, signInMode } from './site-config.js';
 
 const STATE_KEY = 'crowdline:state';
@@ -41,7 +41,7 @@ export function createLocalApi({ storage = globalThis.localStorage, now, config 
 
   const mode = signInMode(config);
   route('GET', '/config', () => ({
-    categories: CATEGORIES, local: true, signIn: mode, googleClientId: config.googleClientId, firebase: config.firebase, ads: config.ads,
+    feeBps: FEE_BPS, categories: CATEGORIES, local: true, signIn: mode, googleClientId: config.googleClientId, firebase: config.firebase, ads: config.ads,
   }));
   route('POST', '/google', ({ body }) => {
     if (mode === 'password') throw new ApiError(400, 'Google sign-in is not set up on this site');

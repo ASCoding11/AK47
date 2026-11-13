@@ -55,22 +55,23 @@ test(`${kind}: orders rest until the opposite side agrees on price`, async () =>
   assert.equal(engine.stats().balanced, true);
 });
 
-test(`${kind}: the winner collects the loser's stake in full, with no fee`, async () => {
+test(`${kind}: winner pays 10% of winnings, loser pays nothing, platform holds no risk`, async () => {
   const { engine, admin, alice, bob, market, balance } = await setup();
   engine.placeOrder(alice.id, market.id, { side: 'yes', price: 60, qty: 10 });
   engine.placeOrder(bob.id, market.id, { side: 'no', price: 40, qty: 10 });
-  engine.resolveMarket(admin.id, market.id, 'yes');
+  const { fees } = engine.resolveMarket(admin.id, market.id, 'yes');
 
-  // Alice staked 600 and wins 1000; Bob loses his 400.
-  assert.equal(balance(alice), 100_000 + 400);
+  // Alice staked 600 and wins 1000: winnings 400, fee 40. Bob loses his 400.
+  assert.equal(fees, 40);
+  assert.equal(balance(alice), 100_000 + 400 - 40);
   assert.equal(balance(bob), 100_000 - 400);
   const s = engine.stats();
-  assert.equal(s.feeRevenue, 0);
+  assert.equal(s.feeRevenue, 40);
   assert.equal(s.orderEscrow + s.positionEscrow, 0);
   assert.equal(s.balanced, true);
 });
 
-test(`${kind}: traders holding both sides are paid on each`, async () => {
+test(`${kind}: the fee is on net winnings across both sides of a market`, async () => {
   const { engine, admin, alice, bob, market, balance } = await setup();
   engine.placeOrder(alice.id, market.id, { side: 'yes', price: 50, qty: 10 });
   engine.placeOrder(bob.id, market.id, { side: 'no', price: 50, qty: 10 });
@@ -78,10 +79,10 @@ test(`${kind}: traders holding both sides are paid on each`, async () => {
   engine.placeOrder(bob.id, market.id, { side: 'yes', price: 30, qty: 10 });
   engine.placeOrder(alice.id, market.id, { side: 'no', price: 70, qty: 10 });
   engine.resolveMarket(admin.id, market.id, 'yes');
-  // Alice: paid 500 + 700, receives 1000.
+  // Alice: paid 500 + 700, receives 1000: a loss, so no fee.
   assert.equal(balance(alice), 100_000 - 200);
-  // Bob: paid 500 + 300, receives 1000.
-  assert.equal(balance(bob), 100_000 + 200);
+  // Bob: paid 500 + 300, receives 1000: winnings 200, fee 20.
+  assert.equal(balance(bob), 100_000 + 200 - 20);
   assert.equal(engine.stats().balanced, true);
 });
 
@@ -89,7 +90,8 @@ test(`${kind}: void refunds every stake and open order`, async () => {
   const { engine, admin, alice, bob, market, balance } = await setup();
   engine.placeOrder(alice.id, market.id, { side: 'yes', price: 70, qty: 5 });
   engine.placeOrder(bob.id, market.id, { side: 'no', price: 30, qty: 3 });
-  engine.resolveMarket(admin.id, market.id, 'void');
+  const { fees } = engine.resolveMarket(admin.id, market.id, 'void');
+  assert.equal(fees, 0);
   assert.equal(balance(alice), 100_000);
   assert.equal(balance(bob), 100_000);
   assert.equal(engine.getMarket(market.id).status, 'voided');
@@ -189,7 +191,7 @@ test(`${kind}: a reported result pays out only after an admin verifies it`, asyn
   assert.throws(() => engine.resolveMarket(maker.id, market.id, 'yes'), /admin/);
   engine.resolveMarket(admin.id, market.id, 'no');
   assert.equal(engine.getMarket(market.id).outcome, 'no');
-  assert.equal(balance(bob), 100_000 + 600);
+  assert.equal(balance(bob), 100_000 + 600 - 60);
   assert.equal(engine.stats().proposed.length, 0);
   assert.equal(engine.stats().balanced, true);
 });

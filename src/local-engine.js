@@ -9,12 +9,18 @@
 //   * A trade only happens when a YES buyer and a NO buyer agree on prices that
 //     sum to 100, and both pay up front, so every contract is fully funded.
 //     The platform never takes a position.
-//   * At settlement each winning contract pays its holder in full; there is no fee.
+//   * At settlement Crowdline keeps FEE_BPS of each member's net profit in that
+//     market (in Avenues). Losers and break-even members pay nothing.
 
+export const FEE_BPS = 1000; // 10% of winnings
 export const CATEGORIES = ['Politics', 'Sports', 'Economics', 'Tech', 'Culture', 'Science', 'Other'];
 // Balances are play money ("Avenues") in hundredths: 100 units = 1 Avenue.
 export const WELCOME_BONUS = 100_000; // 1,000 Avenues, once per account
 const MAX_QTY = 100_000;
+
+export function feeOn(profit) {
+  return profit > 0 ? Math.floor((profit * FEE_BPS) / 10_000) : 0;
+}
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -273,7 +279,7 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   }
 
   function positionView(p) {
-    return p && { yesQty: p.yes_qty, noQty: p.no_qty, yesCost: p.yes_cost, noCost: p.no_cost, payout: p.payout };
+    return p && { yesQty: p.yes_qty, noQty: p.no_qty, yesCost: p.yes_cost, noCost: p.no_cost, payout: p.payout, fee: p.fee };
   }
 
   function marketDetail(id, userId) {
@@ -385,17 +391,23 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
   // Pays out a market. Runs inside a transaction.
   function settle(m, outcome) {
     for (const order of openOrders(m.id)) cancelRow(order);
+    let fees = 0;
     for (const p of Object.values(s.positions).filter((p) => p.market_id === m.id)) {
       const cost = p.yes_cost + p.no_cost;
       const payout = outcome === 'void' ? cost : 100 * (outcome === 'yes' ? p.yes_qty : p.no_qty);
-      adjust(p.user_id, payout, outcome === 'void' ? 'void_refund' : 'payout', m.id);
+      const fee = feeOn(payout - cost);
+      adjust(p.user_id, payout - fee, outcome === 'void' ? 'void_refund' : 'payout', m.id);
       p.payout = payout;
-      p.fee = 0;
+      p.fee = fee;
+      fees += fee;
+    }
+    if (fees > 0) {
+      s.ledger.push({ id: s.ledger.length + 1, user_id: null, market_id: m.id, type: 'fee', amount: fees, created_at: now() });
     }
     m.status = outcome === 'void' ? 'voided' : 'resolved';
     m.outcome = outcome === 'void' ? null : outcome;
     m.resolved_at = now();
-    return { market: marketView(m) };
+    return { market: marketView(m), fees };
   }
 
   const OUTCOMES = ['yes', 'no', 'void'];
@@ -472,7 +484,6 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
       userBalances: sum(s.users, (u) => u.balance),
       orderEscrow: sum(s.orders.filter((o) => o.status === 'open'), (o) => o.remaining * o.price),
       positionEscrow: sum(Object.values(s.positions).filter((p) => openMarkets.has(p.market_id)), (p) => p.yes_cost + p.no_cost),
-      // Only an earlier version charged a fee; saved demos may still hold some.
       feeRevenue: sum(s.ledger.filter((l) => l.type === 'fee'), (l) => l.amount),
       users: s.users.length,
       markets: s.markets.length,
@@ -483,6 +494,11 @@ export function createEngine({ storage = memoryStorage(), key = 'crowdline:state
       .filter((m) => m.status === 'open' && m.closes_at <= now())
       .sort((a, b) => a.closes_at - b.closes_at)
       .map(marketView);
+    st.feesByMarket = s.ledger
+      .filter((l) => l.type === 'fee')
+      .reverse()
+      .slice(0, 50)
+      .map((l) => ({ marketId: l.market_id, question: marketRow(l.market_id).question, amount: l.amount }));
     st.proposed = s.markets.filter((m) => m.status === 'proposed' || m.status === 'disputed').sort((a, b) => a.proposed_at - b.proposed_at).map(marketView);
     st.reports = s.reports
       .filter((r) => !['resolved', 'voided'].includes(marketRow(r.market_id).status))

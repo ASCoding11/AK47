@@ -1,24 +1,9 @@
-// GitHub Pages build: there is no server, so the exchange runs in this
-// browser and saves to localStorage.
-import { createLocalApi } from './local-api.js';
+// How the GitHub Pages app reaches the exchange: the shared Firebase backend
+// once `firebase.sharedMarkets` is on in site-config.js, otherwise the
+// browser-only copy.
+import { SITE_CONFIG, signInMode } from './site-config.js';
 
-let storage;
-try {
-  storage = window.localStorage;
-  storage.getItem('crowdline:probe');
-} catch {
-  // Private mode or blocked storage: keep state in memory for this visit.
-  const map = new Map();
-  storage = {
-    getItem: (k) => (map.has(k) ? map.get(k) : null),
-    setItem: (k, v) => map.set(k, String(v)),
-    removeItem: (k) => map.delete(k),
-  };
-}
+const shared = signInMode(SITE_CONFIG) === 'firebase' && SITE_CONFIG.firebase.sharedMarkets === true;
+const impl = shared ? await import('./firebase-transport.js') : await import('./local-transport.js');
 
-const local = createLocalApi({ storage });
-
-export function request(method, path, body) {
-  // Round-trip through JSON so the page never holds live engine objects.
-  return local.request(method, path, body).then((data) => JSON.parse(JSON.stringify(data)));
-}
+export const request = (method, path, body) => impl.request(method, path, body);

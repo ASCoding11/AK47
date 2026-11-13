@@ -1,0 +1,12 @@
+rules_version = '2';
+
+// Browsers never touch the database directly. Every read and write goes
+// through the `api` Cloud Function, which uses the Admin SDK (rules don't
+// apply to it), so nobody can edit their own balance or anyone else's bets.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

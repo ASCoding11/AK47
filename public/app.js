@@ -6,7 +6,7 @@ const toastEl = document.getElementById('toast');
 
 const state = {
   user: null,
-  config: { categories: [] },
+  config: { feeBps: 1000, categories: [] },
   filters: { status: 'open', category: '', q: '' },
   ticket: { side: 'yes', price: null, qty: 100 },
   detail: null,
@@ -24,6 +24,8 @@ const money = (units) => {
   return `${units < 0 ? '-' : ''}${text} ${n === 1 ? 'Avenue' : 'Avenues'}`;
 };
 const signed = (cents) => (cents > 0 ? '+' : '') + money(cents);
+const fee = (profit) => (profit > 0 ? Math.floor((profit * (state.config.feeBps ?? 0)) / 10000) : 0);
+const feePct = () => `${(state.config.feeBps ?? 0) / 100}%`;
 const date = (ms) => new Date(ms).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 
 function api(path, { method = 'GET', body } = {}) {
@@ -145,7 +147,7 @@ async function marketPage(id) {
   const bestNo = d.book.no[0]?.price;
   const bestYes = d.book.yes[0]?.price;
   if (state.ticket.marketId !== m.id) {
-    state.ticket = { marketId: m.id, side: 'yes', qty: 100, price: bestNo ? 100 - bestNo : m.lastPrice ?? 50 };
+    state.ticket = { marketId: m.id, side: 'yes', bet: 10, win: null };
   }
   const p = impliedPrice({ ...m, yesBid: bestYes, yesAsk: bestNo ? 100 - bestNo : null });
   const isCreator = state.user?.id === m.creatorId;
@@ -254,10 +256,10 @@ function resultPanel(d, isCreator) {
 function bookSide(side, levels) {
   return `
     <table>
-      <tr><th class="${side}">${side.toUpperCase()} bids</th><th class="r">Contracts</th></tr>
+      <tr><th class="${side}">Betting ${side.toUpperCase()} at</th><th class="r">Avenues waiting</th></tr>
       ${levels.length
-        ? levels.map((l) => `<tr><td class="num ${side}">${l.price}%</td><td class="r num">${l.qty.toLocaleString()}</td></tr>`).join('')
-        : '<tr><td colspan="2" class="muted">No bids</td></tr>'}
+        ? levels.map((l) => `<tr><td class="num ${side}">${l.price}%</td><td class="r num">${money(l.qty * l.price)}</td></tr>`).join('')
+        : '<tr><td colspan="2" class="muted">No bets waiting</td></tr>'}
     </table>`;
 }
 
@@ -275,36 +277,56 @@ function chart(trades) {
     </svg>`;
 }
 
+// The cheapest price someone is offering on `side` right now (a percentage),
+// or null when nobody is betting the other way.
+function bestAsk(side) {
+  const opp = side === 'yes' ? state.detail.book.no : state.detail.book.yes;
+  return opp[0] ? 100 - opp[0].price : null;
+}
+
+// "I'll bet B to win at least W" becomes a limit order: B + W contracts that
+// each pay 1 Avenue, at a price that never costs more than B in total.
+function betToOrder(bet, win) {
+  if (!Number.isInteger(bet) || !Number.isInteger(win) || bet < 1 || win < 1) return { error: 'Enter whole numbers of Avenues.' };
+  if (win > 99 * bet) return { error: 'You can ask to win at most 99 times your bet.' };
+  const qty = bet + win;
+  if (qty > 100_000) return { error: 'Your bet plus winnings can be at most 100,000 Avenues.' };
+  const price = Math.floor((100 * bet) / qty);
+  return { qty, price, cost: price * qty, payout: qty * 100 };
+}
+
+// The most someone could ask to win on a bet of `bet` and still be matched now.
+function maxWinNow(side, bet) {
+  const ask = bestAsk(side);
+  if (ask == null || !Number.isInteger(bet) || bet < 1) return null;
+  const w = Math.floor((100 * bet) / ask - bet);
+  return w >= 1 ? w : null;
+}
+
 function renderTicket() {
   const el = document.getElementById('ticket');
   if (!el) return;
   if (!state.user) {
-    el.innerHTML = `<h2>Trade</h2><p class="muted">Sign in to trade. New members get 1,000 Avenues free.</p>
+    el.innerHTML = `<h2>Place a bet</h2><p class="muted">Sign in to bet. New members get 1,000 Avenues free.</p>
       <a class="btn primary" href="${signInHref()}">Sign in</a>`;
     return;
   }
   const t = state.ticket;
-  const book = state.detail.book;
-  const opp = t.side === 'yes' ? book.no : book.yes;
-  const ask = opp[0] ? 100 - opp[0].price : null;
+  if (t.win == null) t.win = maxWinNow(t.side, t.bet) ?? t.bet;
   el.innerHTML = `
-    <h2>Trade</h2>
+    <h2>Place a bet</h2>
     <div class="sides">
-      <button class="s-yes ${t.side === 'yes' ? 'active' : ''}" data-action="side" data-side="yes">Buy YES</button>
-      <button class="s-no ${t.side === 'no' ? 'active' : ''}" data-action="side" data-side="no">Buy NO</button>
+      <button class="s-yes ${t.side === 'yes' ? 'active' : ''}" data-action="side" data-side="yes">Bet YES</button>
+      <button class="s-no ${t.side === 'no' ? 'active' : ''}" data-action="side" data-side="no">Bet NO</button>
     </div>
     <form data-form="order">
       <div class="two">
-        <label>Limit price (%)<input name="price" type="number" min="1" max="99" step="1" required value="${t.price ?? ''}"></label>
-        <label>Contracts<input name="qty" type="number" min="1" step="1" required value="${t.qty}"></label>
+        <label>I’ll bet (Avenues)<input id="bet-amount" name="bet" type="number" min="1" step="1" required value="${t.bet ?? ''}"></label>
+        <label>To win at least<input id="bet-win" name="win" type="number" min="1" step="1" required value="${t.win ?? ''}"></label>
       </div>
-      <p class="muted small">${ask == null
-        ? `Nobody is offering ${t.side.toUpperCase()} right now. Your order will wait in the book for a match.`
-        : `Fills right away at ${ask}% or higher. A lower price waits in the book.`}</p>
-      <p class="muted small">Each contract pays 1 Avenue if you’re right. Its price is a percentage of that Avenue:
-      at 60%, a contract costs 0.60 Avenues.</p>
+      <p class="muted small" id="match-hint"></p>
       <div class="summary" id="summary"></div>
-      <button class="wide ${t.side === 'yes' ? 'buy-yes' : 'buy-no'}">Buy ${t.side.toUpperCase()}</button>
+      <button class="wide ${t.side === 'yes' ? 'buy-yes' : 'buy-no'}" id="bet-button">Bet ${t.side.toUpperCase()}</button>
     </form>`;
   renderSummary();
 }
@@ -312,15 +334,24 @@ function renderTicket() {
 function renderSummary() {
   const el = document.getElementById('summary');
   if (!el) return;
-  const { price, qty, side } = state.ticket;
-  const ok = Number.isInteger(price) && price >= 1 && price <= 99 && Number.isInteger(qty) && qty >= 1;
-  if (!ok) return (el.innerHTML = '<div class="muted">Enter a price from 1 to 99 and a quantity.</div>');
-  const cost = price * qty;
-  const profit = qty * 100 - cost;
+  const { bet, win, side } = state.ticket;
+  const hint = document.getElementById('match-hint');
+  const maxWin = maxWinNow(side, bet);
+  if (hint) {
+    hint.textContent = maxWin == null
+      ? `Nobody is betting ${side === 'yes' ? 'NO' : 'YES'} right now. Your bet waits until someone takes the other side.`
+      : `Someone will take this bet right now if you ask to win ${maxWin.toLocaleString()} or less. Ask for more and your bet waits for a match.`;
+  }
+  const o = betToOrder(bet, win);
+  if (o.error) return (el.innerHTML = `<div class="muted">${o.error}</div>`);
+  const profit = o.payout - o.cost;
   el.innerHTML = `
-    <div><span class="muted">You pay at most</span><span class="num">${money(cost)}</span></div>
-    <div><span class="muted">Payout if ${side.toUpperCase()}</span><span class="num">${money(qty * 100)}</span></div>
-    <div class="total"><span>Profit if ${side.toUpperCase()}</span><span class="num yes">${signed(profit)}</span></div>`;
+    <div><span class="muted">You bet at most</span><span class="num">${money(o.cost)}</span></div>
+    <div><span class="muted">You win if ${side.toUpperCase()}</span><span class="num">${signed(profit)}</span></div>
+    <div><span class="muted">Crowdline’s cut (${feePct()} of winnings)</span><span class="num">-${money(fee(profit))}</span></div>
+    <div class="total"><span>You keep if ${side.toUpperCase()}</span><span class="num yes">${signed(profit - fee(profit))}</span></div>`;
+  const button = document.getElementById('bet-button');
+  if (button) button.textContent = `Bet ${money(o.cost)} on ${side.toUpperCase()}`;
 }
 
 function positionPanel(d) {
@@ -331,9 +362,10 @@ function positionPanel(d) {
     qty ? `<tr><td class="${side}">${side.toUpperCase()}</td><td class="r num">${qty.toLocaleString()}</td><td class="r num">${(c / qty).toFixed(1)}%</td><td class="r num">${money(c)}</td></tr>` : '';
   let outcome = '';
   if (p.payout != null) {
-    const net = p.payout - cost;
+    const net = p.payout - p.fee - cost;
     outcome = `<div class="summary">
       <div><span class="muted">Payout</span><span class="num">${money(p.payout)}</span></div>
+      <div><span class="muted">Crowdline’s cut</span><span class="num">-${money(p.fee)}</span></div>
       <div class="total"><span>Result</span><span class="num ${net >= 0 ? 'yes' : 'no'}">${signed(net)}</span></div></div>`;
   }
   return `<div class="panel"><h2>Your position</h2>
@@ -343,10 +375,10 @@ function positionPanel(d) {
 
 function ordersPanel(d) {
   if (!d.orders?.length) return '';
-  return `<div class="panel"><h2>Your open orders</h2><table>
+  return `<div class="panel"><h2>Your bets waiting for a match</h2><table>
     ${d.orders.map((o) => `<tr>
       <td class="${o.side}">${o.side.toUpperCase()}</td>
-      <td class="num">${o.remaining.toLocaleString()} @ ${o.price}%</td>
+      <td class="num">Bet ${money(o.remaining * o.price)} to win ${money(o.remaining * (100 - o.price))}</td>
       <td class="r"><button class="link" data-action="cancel" data-id="${o.id}">Cancel</button></td></tr>`).join('')}
   </table></div>`;
 }
@@ -418,7 +450,7 @@ const LEDGER_LABELS = {
   order_reserve: 'Order placed',
   order_refund: 'Order cancelled',
   price_improvement: 'Filled at a better price',
-  payout: 'Market payout',
+  payout: 'Market payout (after Crowdline’s cut)',
   void_refund: 'Market voided, stake returned',
 };
 
@@ -455,11 +487,11 @@ async function portfolioPage() {
         : '<div class="muted">No open orders.</div>'}
     </div>
     <div class="panel scroll"><h2>Settled</h2>
-      ${settled.length ? `<table><tr><th>Market</th><th>Held</th><th class="r">Cost</th><th class="r">Payout</th><th class="r">Result</th></tr>
+      ${settled.length ? `<table><tr><th>Market</th><th>Held</th><th class="r">Cost</th><th class="r">Payout</th><th class="r">Cut</th><th class="r">Result</th></tr>
         ${settled.map((r) => {
-          const p = r.position, cost = p.yesCost + p.noCost, net = p.payout - cost;
+          const p = r.position, cost = p.yesCost + p.noCost, net = p.payout - p.fee - cost;
           return `<tr><td><a href="#/m/${r.market.id}">${esc(r.market.question)}</a> ${statusBadge(r.market)}</td><td>${holding(p)}</td>
-            <td class="r num">${money(cost)}</td><td class="r num">${money(p.payout)}</td>
+            <td class="r num">${money(cost)}</td><td class="r num">${money(p.payout)}</td><td class="r num">${money(p.fee)}</td>
             <td class="r num ${net >= 0 ? 'yes' : 'no'}">${signed(net)}</td></tr>`;
         }).join('')}</table>`
         : '<div class="muted">Nothing settled yet.</div>'}
@@ -482,6 +514,7 @@ async function adminPage() {
   view.innerHTML = `
     <h1>Admin</h1>
     <div class="stats">
+      ${stat(`Crowdline’s cut (${feePct()} of winnings)`, money(s.feeRevenue))}
       ${stat('Users', s.users.toLocaleString())}
       ${stat('Markets', s.markets.toLocaleString())}
       ${stat('Contracts traded', s.contractsTraded.toLocaleString())}
@@ -491,7 +524,7 @@ async function adminPage() {
         <div><span class="muted">Member balances</span><span class="num">${money(s.userBalances)}</span></div>
         <div><span class="muted">Held for open orders</span><span class="num">${money(s.orderEscrow)}</span></div>
         <div><span class="muted">Held for open positions</span><span class="num">${money(s.positionEscrow)}</span></div>
-        ${s.feeRevenue ? `<div><span class="muted">Fees from an earlier version</span><span class="num">${money(s.feeRevenue)}</span></div>` : ''}
+        <div><span class="muted">Crowdline’s cut</span><span class="num">${money(s.feeRevenue)}</span></div>
         <div class="total"><span>Avenues given out</span><span class="num">${money(s.deposits)}</span></div>
       </div>
       <span class="badge ${s.balanced ? 'yes' : 'no'}">${s.balanced ? 'Books balance: every payout is fully funded by traders' : 'Books do not balance'}</span>
@@ -512,6 +545,11 @@ async function adminPage() {
       ${s.awaitingResolution.length ? `<table>${s.awaitingResolution.map((m) => `<tr>
         <td><a href="#/m/${m.id}">${esc(m.question)}</a></td><td class="r muted">${esc(m.creator)} · closed ${date(m.closesAt)}</td></tr>`).join('')}</table>`
         : '<div class="muted">Every closed market has a reported result.</div>'}
+    </div>
+    <div class="panel scroll"><h2>Cut by market</h2>
+      ${s.feesByMarket?.length ? `<table>${s.feesByMarket.map((f) => `<tr>
+        <td><a href="#/m/${f.marketId}">${esc(f.question)}</a></td><td class="r num">${money(f.amount)}</td></tr>`).join('')}</table>`
+        : '<div class="muted">Nothing collected yet.</div>'}
     </div>`;
 }
 
@@ -526,8 +564,9 @@ function termsPage() {
       <p>Members create markets and trade with each other. Every trade is between two members: one buys YES,
       the other buys NO, and together their payments fund the 1 Avenue that each contract pays the winner.
       Crowdline never buys or sells contracts, never takes the other side of a trade, and doesn’t set prices.</p>
-      <h2>No fees</h2>
-      <p>When a market settles, every winning contract pays its holder 1 Avenue in full. Crowdline takes nothing.</p>
+      <h2>Crowdline’s cut</h2>
+      <p>When a market settles, Crowdline keeps ${feePct()} of each member’s winnings in that market, in Avenues.
+      Winnings are what the market paid you minus everything you bet in it. If you lose or break even, you pay nothing.</p>
       <h2>Who decides the result</h2>
       <p>Crowdline verifies every result. When the event happens, the member who created the market reports what
       happened and the source that shows it, and trading stops. A Crowdline admin checks the result against the
@@ -658,11 +697,29 @@ function renderFirebaseButton() {
     </svg>
     Continue with Google</button>`;
   // Start loading the SDK now so the popup opens straight from the click.
-  loadFirebaseAuth().catch(() => {});
+  // (With shared markets the transport has loaded it already.)
+  if (!state.config.shared) loadFirebaseAuth().catch(() => {});
 }
 
 async function firebaseSignIn(button) {
   button.disabled = true;
+  if (state.config.shared) {
+    // Shared markets: Firebase keeps the session, and the server creates the
+    // member (with the welcome Avenues) on their first visit.
+    try {
+      const { user, isNew } = await api('/firebase-signin', { method: 'POST' });
+      state.user = user;
+      toast(isNew ? `Welcome! You have ${money(user.balance)} to bet with.` : `Welcome back, ${user.username}`);
+      location.hash = '#/';
+    } catch (err) {
+      if (err.code !== 'auth/popup-closed-by-user' && err.code !== 'auth/cancelled-popup-request') {
+        toast(FIREBASE_ERRORS[err.code] ?? err.message, true);
+      }
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
   try {
     let loaded;
     try {
@@ -782,7 +839,7 @@ const actions = {
   },
   side(el) {
     const t = state.ticket;
-    if (t.side !== el.dataset.side && Number.isInteger(t.price)) t.price = 100 - t.price;
+    if (t.side !== el.dataset.side) t.win = null; // re-suggest from the other side's odds
     t.side = el.dataset.side;
     renderTicket();
   },
@@ -795,8 +852,8 @@ const actions = {
     const outcome = el.dataset.outcome;
     const label = outcome === 'void' ? 'void this market and refund everyone' : `resolve this market ${outcome.toUpperCase()}`;
     if (!confirm(`Really ${label}? This cannot be undone.`)) return;
-    await api(`/markets/${state.detail.market.id}/resolve`, { method: 'POST', body: { outcome } });
-    toast(outcome === 'void' ? 'Market voided, stakes refunded' : `Market settled as ${outcome.toUpperCase()}`);
+    const { fees } = await api(`/markets/${state.detail.market.id}/resolve`, { method: 'POST', body: { outcome } });
+    toast(outcome === 'void' ? 'Market voided, stakes refunded' : `Market settled as ${outcome.toUpperCase()}. Crowdline’s cut: ${money(fees ?? 0)}`);
     render();
   },
   async resetDemo() {
@@ -809,10 +866,14 @@ const actions = {
 
 const forms = {
   async order() {
-    const { marketId, side, price, qty } = state.ticket;
-    const r = await api(`/markets/${marketId}/orders`, { method: 'POST', body: { side, price, qty } });
-    toast(r.filled && r.resting ? `${r.filled} filled, ${r.resting} waiting in the book`
-      : r.filled ? `Filled ${r.filled} contracts` : 'Order is waiting in the book');
+    const { marketId, side, bet, win } = state.ticket;
+    const o = betToOrder(bet, win);
+    if (o.error) throw new Error(o.error);
+    const r = await api(`/markets/${marketId}/orders`, { method: 'POST', body: { side, price: o.price, qty: o.qty } });
+    const share = Math.round((100 * r.filled) / o.qty);
+    toast(r.filled && r.resting ? `${share}% of your bet was matched. The rest waits for a match.`
+      : r.filled ? 'Your bet was matched' : 'Your bet is waiting for someone to take the other side');
+    state.ticket.win = null;
     render();
   },
   async create(data) {

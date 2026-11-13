@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import { dirname, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ApiError, CATEGORIES, createEngine } from './src/engine.js';
+import { ApiError, CATEGORIES, FEE_BPS, createEngine } from './src/engine.js';
 import { createFirebaseVerifier, createGoogleVerifier } from './src/google-auth.js';
 import { SITE_CONFIG, signInMode } from './src/site-config.js';
 
@@ -63,7 +63,7 @@ const route = (method, pattern, handler, { auth = false } = {}) =>
   routes.push({ method, re: new RegExp(`^${pattern.replace(/:id/g, '(\\d+)')}$`), handler, auth });
 
 route('GET', '/api/config', () => ({
-  categories: CATEGORIES, signIn: SIGN_IN, googleClientId: GOOGLE_CLIENT_ID, firebase: SITE_CONFIG.firebase, ads: ADS,
+  feeBps: FEE_BPS, categories: CATEGORIES, signIn: SIGN_IN, googleClientId: GOOGLE_CLIENT_ID, firebase: SITE_CONFIG.firebase, ads: ADS,
 }));
 route('GET', '/api/me', ({ user }) => ({ user }));
 route('POST', '/api/google', async ({ body, res }) => {

@@ -12,6 +12,8 @@ const files = {
   'style.css': 'public/style.css',
   'app.js': 'public/app.js',
   'transport.js': 'pages/transport.js',
+  'local-transport.js': 'pages/local-transport.js',
+  'firebase-transport.js': 'pages/firebase-transport.js',
   'local-api.js': 'src/local-api.js',
   'local-engine.js': 'src/local-engine.js',
   'site-config.js': 'src/site-config.js',
