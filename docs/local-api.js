@@ -1,6 +1,6 @@
 // The server's HTTP API, answered in the browser by src/local-engine.js.
 // Used by the static GitHub Pages build, where there is no server.
-import { ApiError, CATEGORIES, FEE_BPS, createEngine } from './local-engine.js';
+import { ApiError, CATEGORIES, createEngine } from './local-engine.js';
 import { SITE_CONFIG } from './site-config.js';
 
 const STATE_KEY = 'crowdline:state';
@@ -99,18 +99,18 @@ export function createLocalApi({ storage = globalThis.localStorage, now, config 
   const route = (method, pattern, handler, auth = false) =>
     routes.push({ method, re: new RegExp(`^${pattern.replace(/:id/g, '(\\d+)')}$`), handler, auth });
 
-  route('GET', '/config', () => ({ feeBps: FEE_BPS, categories: CATEGORIES, local: true, googleClientId: config.googleClientId, ads: config.ads }));
+  route('GET', '/config', () => ({ categories: CATEGORIES, local: true, googleClientId: config.googleClientId, ads: config.ads }));
   route('POST', '/google', ({ body }) => {
     if (!config.googleClientId) throw new ApiError(400, 'Google sign-in is not set up on this site');
     const claims = decodeGoogleToken(body.credential, config.googleClientId, now ? now() : Date.now());
-    const { user, token: t, isNew } = engine.googleSignIn(claims, body.agree === true || body.agree === 'on');
+    const { user, token: t, isNew } = engine.googleSignIn(claims);
     setToken(t);
     return { user, isNew };
   });
   route('GET', '/me', ({ user }) => ({ user }));
   route('POST', '/register', async ({ body }) => {
     if (config.googleClientId) throw new ApiError(403, 'Sign in with Google to create an account');
-    const { user, token: t } = await engine.register(body.username, body.password, body.agree === true || body.agree === 'on');
+    const { user, token: t } = await engine.register(body.username, body.password);
     setToken(t);
     return { user };
   });

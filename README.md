@@ -78,12 +78,13 @@ Set `ads.showPlaceholders` to `false` to hide them.
 - A market's **creator reports the result**, and can't trade in their own
   market. Reporting stops trading. Traders then have 24 hours to dispute; an
   undisputed result pays out automatically, and a disputed one waits for an admin.
-- At settlement each trader receives their payout minus a fee of 10% of their
-  net profit in that market, in Avenues. A voided market returns every stake.
+- At settlement every winning contract pays its holder 1 Avenue in full; there
+  is no fee. A voided market returns every stake. There is no age requirement:
+  it's a free game with no real money.
 - Members can report markets that break the content rules.
 
 The admin page shows where every Avenue is held and checks that the Avenues
-given out equal member balances, escrow and fees kept. The test suite asserts
+given out equal member balances plus escrow. The test suite asserts
 the same through randomized trading.
 
 ## Layout

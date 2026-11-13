@@ -5,12 +5,10 @@
 //   * A trade only happens when a YES buyer and a NO buyer agree on prices that
 //     sum to 100. Both sides pay up front, so every contract is backed by
 //     exactly 100 held in escrow. The platform never takes a position.
-//   * At settlement the platform keeps FEE_BPS of each user's net profit in
-//     that market. Losers and break-even users pay nothing.
+//   * At settlement each winning contract pays its holder in full; there is no fee.
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
-export const FEE_BPS = 1000; // 10% of profit
 export const DISPUTE_WINDOW_MS = 24 * 3_600_000; // traders' time to dispute a creator's result
 export const CATEGORIES = ['Politics', 'Sports', 'Economics', 'Tech', 'Culture', 'Science', 'Other'];
 // Balances are play money ("Avenues") in hundredths: 100 units = 1 Avenue,
@@ -126,10 +124,6 @@ function checkPassword(password, stored) {
   return timingSafeEqual(expected, actual);
 }
 
-export function feeOn(profit) {
-  return profit > 0 ? Math.floor((profit * FEE_BPS) / 10_000) : 0;
-}
-
 export function createEngine(path = ':memory:', { demo = true, now = () => Date.now() } = {}) {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
@@ -169,10 +163,9 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
     return u && { id: u.id, username: u.username, balance: u.balance, isAdmin: !!u.is_admin };
   }
 
-  function register(username, password, agreed = true) {
+  function register(username, password) {
     username = String(username ?? '').trim();
     password = String(password ?? '');
-    if (!agreed) throw new ApiError(400, 'Confirm you are 18 or older and agree to the terms');
     if (!/^[A-Za-z0-9_]{3,20}$/.test(username)) {
       throw new ApiError(400, 'Username must be 3-20 letters, numbers or underscores');
     }
@@ -196,13 +189,12 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
 
   // Signs in with a verified Google identity. A Google account's first
   // sign-in creates the member and grants WELCOME_BONUS, exactly once.
-  function googleSignIn({ sub, name, email }, agreed = false) {
+  function googleSignIn({ sub, name, email }) {
     sub = String(sub ?? '');
     if (!sub) throw new ApiError(401, 'Invalid Google sign-in');
     return tx(() => {
       const existing = q('SELECT * FROM users WHERE google_sub = ?').get(sub);
       if (existing) return { user: publicUser(existing), token: newSession(existing.id), isNew: false };
-      if (!agreed) throw new ApiError(400, 'Confirm you are 18 or older and agree to the terms');
       const username = uniqueUsername(name || String(email ?? '').split('@')[0]);
       const first = q('SELECT COUNT(*) AS n FROM users').get().n === 0;
       const { lastInsertRowid } = q(
@@ -378,7 +370,6 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
         yesCost: p.yes_cost,
         noCost: p.no_cost,
         payout: p.payout,
-        fee: p.fee,
       }
     );
   }
@@ -485,19 +476,11 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
     for (const order of q("SELECT * FROM orders WHERE market_id = ? AND status = 'open'").all(marketId)) {
       cancelRow(order);
     }
-    let fees = 0;
     for (const p of q('SELECT * FROM positions WHERE market_id = ?').all(marketId)) {
       const cost = p.yes_cost + p.no_cost;
       const payout = outcome === 'void' ? cost : 100 * (outcome === 'yes' ? p.yes_qty : p.no_qty);
-      const fee = feeOn(payout - cost);
-      adjust(p.user_id, payout - fee, outcome === 'void' ? 'void_refund' : 'payout', marketId);
-      q('UPDATE positions SET payout = ?, fee = ? WHERE market_id = ? AND user_id = ?')
-        .run(payout, fee, marketId, p.user_id);
-      fees += fee;
-    }
-    if (fees > 0) {
-      q('INSERT INTO ledger (user_id, market_id, type, amount, created_at) VALUES (NULL,?,?,?,?)')
-        .run(marketId, 'fee', fees, now());
+      adjust(p.user_id, payout, outcome === 'void' ? 'void_refund' : 'payout', marketId);
+      q('UPDATE positions SET payout = ?, fee = 0 WHERE market_id = ? AND user_id = ?').run(payout, marketId, p.user_id);
     }
     q('UPDATE markets SET status = ?, outcome = ?, resolved_at = ? WHERE id = ?').run(
       outcome === 'void' ? 'voided' : 'resolved',
@@ -505,7 +488,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
       now(),
       marketId,
     );
-    return { market: getMarket(marketId), fees };
+    return { market: getMarket(marketId) };
   }
 
   const OUTCOMES = ['yes', 'no', 'void'];
@@ -603,7 +586,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
   }
 
   // Where every cent is. `deposits` must always equal the sum of the rest:
-  // the platform holds customer money and its own fees, and nothing else.
+  // every Avenue given out is in a balance, an open order or an open position.
   function stats() {
     finalizeDue();
     const one = (sql) => q(sql).get().n ?? 0;
@@ -615,6 +598,7 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
         `SELECT SUM(p.yes_cost + p.no_cost) AS n FROM positions p
          JOIN markets m ON m.id = p.market_id WHERE m.status IN ('open','proposed','disputed')`,
       ),
+      // Only an earlier version charged a fee; old databases may still hold some.
       feeRevenue: one("SELECT SUM(amount) AS n FROM ledger WHERE type = 'fee'"),
       users: one('SELECT COUNT(*) AS n FROM users'),
       markets: one('SELECT COUNT(*) AS n FROM markets'),
@@ -630,10 +614,6 @@ export function createEngine(path = ':memory:', { demo = true, now = () => Date.
       `SELECT r.market_id AS marketId, m.question, r.reason, r.created_at AS at, u.username AS reporter
        FROM reports r JOIN markets m ON m.id = r.market_id JOIN users u ON u.id = r.user_id
        WHERE m.status NOT IN ('resolved','voided') ORDER BY r.created_at DESC LIMIT 100`,
-    ).all();
-    s.feesByMarket = q(
-      `SELECT l.market_id AS marketId, m.question, l.amount FROM ledger l
-       JOIN markets m ON m.id = l.market_id WHERE l.type = 'fee' ORDER BY l.id DESC LIMIT 50`,
     ).all();
     return s;
   }

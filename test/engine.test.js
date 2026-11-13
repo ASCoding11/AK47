@@ -55,23 +55,22 @@ test(`${kind}: orders rest until the opposite side agrees on price`, async () =>
   assert.equal(engine.stats().balanced, true);
 });
 
-test(`${kind}: winner pays 10% of profit, loser pays nothing, platform holds no risk`, async () => {
+test(`${kind}: the winner collects the loser's stake in full, with no fee`, async () => {
   const { engine, admin, alice, bob, market, balance } = await setup();
   engine.placeOrder(alice.id, market.id, { side: 'yes', price: 60, qty: 10 });
   engine.placeOrder(bob.id, market.id, { side: 'no', price: 40, qty: 10 });
-  const { fees } = engine.resolveMarket(admin.id, market.id, 'yes');
+  engine.resolveMarket(admin.id, market.id, 'yes');
 
-  // Alice staked 600, wins 1000: profit 400, fee 40.
-  assert.equal(fees, 40);
-  assert.equal(balance(alice), 100_000 + 400 - 40);
+  // Alice staked 600 and wins 1000; Bob loses his 400.
+  assert.equal(balance(alice), 100_000 + 400);
   assert.equal(balance(bob), 100_000 - 400);
   const s = engine.stats();
-  assert.equal(s.feeRevenue, 40);
+  assert.equal(s.feeRevenue, 0);
   assert.equal(s.orderEscrow + s.positionEscrow, 0);
   assert.equal(s.balanced, true);
 });
 
-test(`${kind}: fee is charged on net profit across both sides of a market`, async () => {
+test(`${kind}: traders holding both sides are paid on each`, async () => {
   const { engine, admin, alice, bob, market, balance } = await setup();
   engine.placeOrder(alice.id, market.id, { side: 'yes', price: 50, qty: 10 });
   engine.placeOrder(bob.id, market.id, { side: 'no', price: 50, qty: 10 });
@@ -79,19 +78,18 @@ test(`${kind}: fee is charged on net profit across both sides of a market`, asyn
   engine.placeOrder(bob.id, market.id, { side: 'yes', price: 30, qty: 10 });
   engine.placeOrder(alice.id, market.id, { side: 'no', price: 70, qty: 10 });
   engine.resolveMarket(admin.id, market.id, 'yes');
-  // Alice: paid 500 + 700, receives 1000: a loss, so no fee.
+  // Alice: paid 500 + 700, receives 1000.
   assert.equal(balance(alice), 100_000 - 200);
-  // Bob: paid 500 + 300, receives 1000: profit 200, fee 20.
-  assert.equal(balance(bob), 100_000 + 200 - 20);
+  // Bob: paid 500 + 300, receives 1000.
+  assert.equal(balance(bob), 100_000 + 200);
   assert.equal(engine.stats().balanced, true);
 });
 
-test(`${kind}: void refunds every stake and open order with no fee`, async () => {
+test(`${kind}: void refunds every stake and open order`, async () => {
   const { engine, admin, alice, bob, market, balance } = await setup();
   engine.placeOrder(alice.id, market.id, { side: 'yes', price: 70, qty: 5 });
   engine.placeOrder(bob.id, market.id, { side: 'no', price: 30, qty: 3 });
-  const { fees } = engine.resolveMarket(admin.id, market.id, 'void');
-  assert.equal(fees, 0);
+  engine.resolveMarket(admin.id, market.id, 'void');
   assert.equal(balance(alice), 100_000);
   assert.equal(balance(bob), 100_000);
   assert.equal(engine.getMarket(market.id).status, 'voided');
@@ -158,9 +156,9 @@ test(`${kind}: creators cannot trade their own market`, async () => {
   assert.throws(() => engine.placeOrder(maker.id, market.id, { side: 'yes', price: 50, qty: 1 }), /created this market/);
 });
 
-test(`${kind}: signup requires agreeing to the terms`, async () => {
+test(`${kind}: anyone can sign up, with no age check`, async () => {
   const engine = make(() => Date.now());
-  await assert.rejects(async () => engine.register('newbie', 'password1', false), /18 or older/);
+  assert.equal((await engine.register('newbie', 'password1')).user.balance, 100_000);
 });
 
 test(`${kind}: creator's result pays out after the dispute window`, async () => {
@@ -182,7 +180,7 @@ test(`${kind}: creator's result pays out after the dispute window`, async () => 
   advance(1000);
   engine.listMarkets();
   assert.equal(engine.getMarket(market.id).status, 'resolved');
-  assert.equal(balance(alice), 100_000 + 400 - 40);
+  assert.equal(balance(alice), 100_000 + 400);
   assert.equal(engine.stats().balanced, true);
   assert.throws(() => engine.disputeResolution(bob.id, market.id, 'Too late to complain now'), /no longer/);
 });
@@ -204,7 +202,7 @@ test(`${kind}: a disputed result waits for an admin`, async () => {
   assert.equal(engine.stats().disputed.length, 1);
   assert.equal(engine.stats().balanced, true);
   engine.resolveMarket(admin.id, market.id, 'no');
-  assert.equal(balance(bob), 100_000 + 600 - 60);
+  assert.equal(balance(bob), 100_000 + 600);
   assert.equal(engine.stats().disputed.length, 0);
 });
 
@@ -261,17 +259,17 @@ test('pages demo: example markets are seeded and the visitor becomes admin', asy
   assert.equal(markets.length, 6);
   assert.ok(markets.every((m) => m.volume > 0 && m.yesBid != null && m.yesAsk != null && m.yesBid < m.yesAsk));
   await assert.rejects(api.request('GET', '/portfolio'), /Log in/);
-  const { user } = await api.request('POST', '/register', { username: 'visitor', password: 'password1', agree: 'on' });
+  const { user } = await api.request('POST', '/register', { username: 'visitor', password: 'password1' });
   assert.equal(user.isAdmin, true);
   const target = markets[0];
   const r = await api.request('POST', `/markets/${target.id}/orders`, { side: 'yes', price: target.yesAsk, qty: 10 });
   assert.equal(r.filled, 10);
-  await assert.rejects(api.request('POST', '/register', { username: 'second', password: 'password1' }), /18 or older/);
   await api.request('POST', '/login', { username: 'visitor', password: 'password1' });
   await api.request('POST', `/markets/${target.id}/resolve`, { outcome: 'yes' });
   const stats = await api.request('GET', '/admin/stats');
   assert.equal(stats.balanced, true);
-  assert.ok(stats.feeRevenue > 0);
+  assert.equal(stats.feeRevenue, 0);
+  assert.equal(stats.deposits, stats.userBalances + stats.orderEscrow + stats.positionEscrow);
   await api.request('POST', '/reset-demo');
   assert.equal((await api.request('GET', '/me')).user, null);
 });
@@ -281,8 +279,7 @@ test('pages demo: example markets are seeded and the visitor becomes admin', asy
 for (const [kind, make] of Object.entries(ENGINES)) {
   test(`${kind}: Google sign-in grants 1,000 Avenues once per Google account`, async () => {
     const engine = make(() => Date.now());
-    await assert.throws(() => engine.googleSignIn({ sub: 'g-1', name: 'Ada Lovelace' }), /18 or older/);
-    const first = engine.googleSignIn({ sub: 'g-1', name: 'Ada Lovelace' }, true);
+    const first = engine.googleSignIn({ sub: 'g-1', name: 'Ada Lovelace' });
     assert.equal(first.isNew, true);
     assert.equal(first.user.username, 'Ada_Lovelace');
     assert.equal(first.user.balance, 100_000);
@@ -291,10 +288,10 @@ for (const [kind, make] of Object.entries(ENGINES)) {
     assert.equal(again.isNew, false);
     assert.equal(again.user.id, first.user.id);
     assert.equal(engine.getUser(first.user.id).balance, 100_000);
-    const twin = engine.googleSignIn({ sub: 'g-2', name: 'Ada Lovelace' }, true);
+    const twin = engine.googleSignIn({ sub: 'g-2', name: 'Ada Lovelace' });
     assert.equal(twin.user.username, 'Ada_Lovelace2');
     assert.equal(twin.user.isAdmin, false);
-    const short = engine.googleSignIn({ sub: 'g-3', email: 'xy@example.com' }, true);
+    const short = engine.googleSignIn({ sub: 'g-3', email: 'xy@example.com' });
     assert.equal(short.user.username, 'memberxy');
     assert.equal(engine.userForToken(short.token).id, short.user.id);
     await assert.rejects(async () => engine.login('Ada_Lovelace', ''), /Wrong/);
@@ -345,11 +342,10 @@ test('pages demo: Google sign-in replaces password signup once configured', asyn
   const config = { googleClientId: 'my-app', ads: { client: '', slots: {}, showPlaceholders: false } };
   const api = createLocalApi({ storage: memoryStorage(), config });
   assert.equal((await api.request('GET', '/config')).googleClientId, 'my-app');
-  await assert.rejects(api.request('POST', '/register', { username: 'pw_user', password: 'password1', agree: 'on' }), /Sign in with Google/);
+  await assert.rejects(api.request('POST', '/register', { username: 'pw_user', password: 'password1' }), /Sign in with Google/);
   const exp = Math.floor(Date.now() / 1000) + 600;
   const cred = `${b64u({ alg: 'RS256' })}.${b64u({ aud: 'my-app', sub: 'g-9', name: 'Grace Hopper', exp })}.sig`;
-  await assert.rejects(api.request('POST', '/google', { credential: cred }), /18 or older/);
-  const { user, isNew } = await api.request('POST', '/google', { credential: cred, agree: 'on' });
+  const { user, isNew } = await api.request('POST', '/google', { credential: cred });
   assert.equal(isNew, true);
   assert.equal(user.balance, 100_000);
   assert.equal((await api.request('GET', '/me')).user.username, 'Grace_Hopper');

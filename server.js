@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import { dirname, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ApiError, CATEGORIES, FEE_BPS, createEngine } from './src/engine.js';
+import { ApiError, CATEGORIES, createEngine } from './src/engine.js';
 import { createGoogleVerifier } from './src/google-auth.js';
 import { SITE_CONFIG } from './src/site-config.js';
 
@@ -59,18 +59,18 @@ const routes = [];
 const route = (method, pattern, handler, { auth = false } = {}) =>
   routes.push({ method, re: new RegExp(`^${pattern.replace(/:id/g, '(\\d+)')}$`), handler, auth });
 
-route('GET', '/api/config', () => ({ feeBps: FEE_BPS, categories: CATEGORIES, googleClientId: GOOGLE_CLIENT_ID, ads: ADS }));
+route('GET', '/api/config', () => ({ categories: CATEGORIES, googleClientId: GOOGLE_CLIENT_ID, ads: ADS }));
 route('GET', '/api/me', ({ user }) => ({ user }));
 route('POST', '/api/google', async ({ body, res }) => {
   const claims = await verifyGoogleToken(body.credential);
-  const { user, token, isNew } = engine.googleSignIn(claims, body.agree === true || body.agree === 'on');
+  const { user, token, isNew } = engine.googleSignIn(claims);
   res.setHeader('Set-Cookie', sessionCookie(token));
   return { user, isNew };
 });
 route('POST', '/api/register', ({ body, res }) => {
   // With Google sign-in configured, new accounts come only from Google.
   if (GOOGLE_CLIENT_ID) throw new ApiError(403, 'Sign in with Google to create an account');
-  const { user, token } = engine.register(body.username, body.password, body.agree === true || body.agree === 'on');
+  const { user, token } = engine.register(body.username, body.password);
   res.setHeader('Set-Cookie', sessionCookie(token));
   return { user };
 });

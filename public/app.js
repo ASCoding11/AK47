@@ -6,7 +6,7 @@ const toastEl = document.getElementById('toast');
 
 const state = {
   user: null,
-  config: { feeBps: 1000, categories: [], demo: false },
+  config: { categories: [] },
   filters: { status: 'open', category: '', q: '' },
   ticket: { side: 'yes', price: null, qty: 100 },
   detail: null,
@@ -25,8 +25,6 @@ const money = (units) => {
 };
 const signed = (cents) => (cents > 0 ? '+' : '') + money(cents);
 const date = (ms) => new Date(ms).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
-const fee = (profit) => (profit > 0 ? Math.floor((profit * state.config.feeBps) / 10000) : 0);
-const feePct = () => `${state.config.feeBps / 100}%`;
 
 function api(path, { method = 'GET', body } = {}) {
   return request(method, path, body);
@@ -339,8 +337,7 @@ function renderSummary() {
   el.innerHTML = `
     <div><span class="muted">You pay at most</span><span class="num">${money(cost)}</span></div>
     <div><span class="muted">Payout if ${side.toUpperCase()}</span><span class="num">${money(qty * 100)}</span></div>
-    <div><span class="muted">Fee (${feePct()} of profit)</span><span class="num">-${money(fee(profit))}</span></div>
-    <div class="total"><span>Profit if ${side.toUpperCase()}</span><span class="num yes">${signed(profit - fee(profit))}</span></div>`;
+    <div class="total"><span>Profit if ${side.toUpperCase()}</span><span class="num yes">${signed(profit)}</span></div>`;
 }
 
 function positionPanel(d) {
@@ -351,10 +348,9 @@ function positionPanel(d) {
     qty ? `<tr><td class="${side}">${side.toUpperCase()}</td><td class="r num">${qty.toLocaleString()}</td><td class="r num">${(c / qty).toFixed(1)}%</td><td class="r num">${money(c)}</td></tr>` : '';
   let outcome = '';
   if (p.payout != null) {
-    const net = p.payout - p.fee - cost;
+    const net = p.payout - cost;
     outcome = `<div class="summary">
       <div><span class="muted">Payout</span><span class="num">${money(p.payout)}</span></div>
-      <div><span class="muted">Fee</span><span class="num">-${money(p.fee)}</span></div>
       <div class="total"><span>Result</span><span class="num ${net >= 0 ? 'yes' : 'no'}">${signed(net)}</span></div></div>`;
   }
   return `<div class="panel"><h2>Your position</h2>
@@ -424,8 +420,7 @@ function authPage(mode) {
       <p class="muted">${signup ? 'New accounts get 1,000 Avenues to play with.' : '&nbsp;'}</p>
       <label>Username<input name="username" required autocomplete="username" minlength="3" maxlength="20"></label>
       <label>Password<input name="password" type="password" required minlength="8" autocomplete="${signup ? 'new-password' : 'current-password'}"></label>
-      ${signup ? `<label class="check"><input type="checkbox" id="signup-agree" name="agree" required>
-        <span>I am 18 or older and agree to the <a class="yes" href="#/terms" target="_blank">marketplace terms</a>.</span></label>` : ''}
+      ${signup ? `<p class="muted small">By signing up you agree to the <a class="yes" href="#/terms">marketplace terms</a>.</p>` : ''}
       <button class="primary wide">${signup ? 'Sign up' : 'Log in'}</button>
       <p class="muted small" style="margin-top:14px">${signup
         ? 'Already have an account? <a class="yes" href="#/login">Log in</a>'
@@ -440,7 +435,7 @@ const LEDGER_LABELS = {
   order_reserve: 'Order placed',
   order_refund: 'Order cancelled',
   price_improvement: 'Filled at a better price',
-  payout: 'Market payout (after fee)',
+  payout: 'Market payout',
   void_refund: 'Market voided, stake returned',
 };
 
@@ -477,11 +472,11 @@ async function portfolioPage() {
         : '<div class="muted">No open orders.</div>'}
     </div>
     <div class="panel scroll"><h2>Settled</h2>
-      ${settled.length ? `<table><tr><th>Market</th><th>Held</th><th class="r">Cost</th><th class="r">Payout</th><th class="r">Fee</th><th class="r">Result</th></tr>
+      ${settled.length ? `<table><tr><th>Market</th><th>Held</th><th class="r">Cost</th><th class="r">Payout</th><th class="r">Result</th></tr>
         ${settled.map((r) => {
-          const p = r.position, cost = p.yesCost + p.noCost, net = p.payout - p.fee - cost;
+          const p = r.position, cost = p.yesCost + p.noCost, net = p.payout - cost;
           return `<tr><td><a href="#/m/${r.market.id}">${esc(r.market.question)}</a> ${statusBadge(r.market)}</td><td>${holding(p)}</td>
-            <td class="r num">${money(cost)}</td><td class="r num">${money(p.payout)}</td><td class="r num">${money(p.fee)}</td>
+            <td class="r num">${money(cost)}</td><td class="r num">${money(p.payout)}</td>
             <td class="r num ${net >= 0 ? 'yes' : 'no'}">${signed(net)}</td></tr>`;
         }).join('')}</table>`
         : '<div class="muted">Nothing settled yet.</div>'}
@@ -504,7 +499,6 @@ async function adminPage() {
   view.innerHTML = `
     <h1>Admin</h1>
     <div class="stats">
-      ${stat(`Fees kept (${feePct()} of profit)`, money(s.feeRevenue))}
       ${stat('Users', s.users.toLocaleString())}
       ${stat('Markets', s.markets.toLocaleString())}
       ${stat('Contracts traded', s.contractsTraded.toLocaleString())}
@@ -514,7 +508,7 @@ async function adminPage() {
         <div><span class="muted">Member balances</span><span class="num">${money(s.userBalances)}</span></div>
         <div><span class="muted">Held for open orders</span><span class="num">${money(s.orderEscrow)}</span></div>
         <div><span class="muted">Held for open positions</span><span class="num">${money(s.positionEscrow)}</span></div>
-        <div><span class="muted">Fees kept</span><span class="num">${money(s.feeRevenue)}</span></div>
+        ${s.feeRevenue ? `<div><span class="muted">Fees from an earlier version</span><span class="num">${money(s.feeRevenue)}</span></div>` : ''}
         <div class="total"><span>Avenues given out</span><span class="num">${money(s.deposits)}</span></div>
       </div>
       <span class="badge ${s.balanced ? 'yes' : 'no'}">${s.balanced ? 'Books balance: every payout is fully funded by traders' : 'Books do not balance'}</span>
@@ -541,11 +535,6 @@ async function adminPage() {
       ${s.awaitingResolution.length ? `<table>${s.awaitingResolution.map((m) => `<tr>
         <td><a href="#/m/${m.id}">${esc(m.question)}</a></td><td class="r muted">${esc(m.creator)} · closed ${date(m.closesAt)}</td></tr>`).join('')}</table>`
         : '<div class="muted">Every closed market has a reported result.</div>'}
-    </div>
-    <div class="panel scroll"><h2>Fees by market</h2>
-      ${s.feesByMarket.length ? `<table>${s.feesByMarket.map((f) => `<tr>
-        <td><a href="#/m/${f.marketId}">${esc(f.question)}</a></td><td class="r num">${money(f.amount)}</td></tr>`).join('')}</table>`
-        : '<div class="muted">No fees collected yet.</div>'}
     </div>`;
 }
 
@@ -560,9 +549,8 @@ function termsPage() {
       <p>Members create markets and trade with each other. Every trade is between two members: one buys YES,
       the other buys NO, and together their payments fund the 1 Avenue that each contract pays the winner.
       Crowdline never buys or sells contracts, never takes the other side of a trade, and doesn’t set prices.</p>
-      <h2>The fee</h2>
-      <p>When a market settles, Crowdline keeps ${feePct()} of each member’s net profit in that market, in Avenues. Net profit is what the
-      market paid you minus everything you paid for contracts in it. If you lose or break even, you pay no fee.</p>
+      <h2>No fees</h2>
+      <p>When a market settles, every winning contract pays its holder 1 Avenue in full. Crowdline takes nothing.</p>
       <h2>Who decides the result</h2>
       <p>The member who created a market reports its result, following the rules written in the market.
       Creators can’t trade in their own markets. After a result is reported, trading stops and traders have
@@ -580,8 +568,8 @@ function termsPage() {
       <h2>How Crowdline makes money</h2>
       <p>Crowdline shows ads. It never charges members anything. See the <a class="yes" href="#/privacy">privacy page</a>
       for what the ads and Google sign-in collect.</p>
-      <h2>Eligibility and conduct</h2>
-      <p>You must be 18 or older. Don’t trade on information you got in confidence, manipulate the event a market
+      <h2>Play fair</h2>
+      <p>Crowdline is just for fun. Don’t trade on information you got in confidence, manipulate the event a market
       is about, or use more than one account.</p>
     </article>`;
 }
@@ -612,9 +600,8 @@ function loadScript(src) {
 }
 
 async function onGoogleCredential({ credential }) {
-  const agree = document.getElementById('google-agree')?.checked ?? false;
   try {
-    const { user, isNew } = await api('/google', { method: 'POST', body: { credential, agree } });
+    const { user, isNew } = await api('/google', { method: 'POST', body: { credential } });
     state.user = user;
     toast(isNew ? `Welcome! You have ${money(user.balance)} to trade with.` : `Welcome back, ${user.username}`);
     location.hash = '#/';
@@ -631,11 +618,10 @@ function signInPage() {
       <h1>Sign in to Crowdline</h1>
       <p>New members get <b>1,000 Avenues</b> free, once per Google account. Avenues are play money:
       they can’t be bought, cashed out or exchanged for prizes.</p>
-      <label class="check"><input type="checkbox" id="google-agree">
-        <span>I am 18 or older and agree to the <a class="yes" href="#/terms" target="_blank">marketplace terms</a>
-        and <a class="yes" href="#/privacy" target="_blank">privacy policy</a>. (Only needed the first time.)</span></label>
       <div id="google-button" class="google-button"><span class="muted small">Loading Google sign-in…</span></div>
-      <p class="muted small">We keep your Google account ID and a username made from your name. We don’t post anything to your account.</p>
+      <p class="muted small">By signing in you agree to the <a class="yes" href="#/terms">marketplace terms</a> and
+      <a class="yes" href="#/privacy">privacy policy</a>. We keep your Google account ID and a username made from your name,
+      and we don’t post anything to your account.</p>
     </div>`;
   loadScript('https://accounts.google.com/gsi/client')
     .then(() => {
@@ -755,8 +741,8 @@ const actions = {
     const outcome = el.dataset.outcome;
     const label = outcome === 'void' ? 'void this market and refund everyone' : `resolve this market ${outcome.toUpperCase()}`;
     if (!confirm(`Really ${label}? This cannot be undone.`)) return;
-    const { fees } = await api(`/markets/${state.detail.market.id}/resolve`, { method: 'POST', body: { outcome } });
-    toast(outcome === 'void' ? 'Market voided, stakes refunded' : `Market settled. Fees collected: ${money(fees)}`);
+    await api(`/markets/${state.detail.market.id}/resolve`, { method: 'POST', body: { outcome } });
+    toast(outcome === 'void' ? 'Market voided, stakes refunded' : `Market settled as ${outcome.toUpperCase()}`);
     render();
   },
   async propose(el) {
