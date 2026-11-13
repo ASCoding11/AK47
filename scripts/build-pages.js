@@ -14,6 +14,7 @@ const files = {
   'transport.js': 'pages/transport.js',
   'local-transport.js': 'pages/local-transport.js',
   'firebase-transport.js': 'pages/firebase-transport.js',
+  'firestore-engine.js': 'src/firestore-engine.js',
   'local-api.js': 'src/local-api.js',
   'local-engine.js': 'src/local-engine.js',
   'site-config.js': 'src/site-config.js',

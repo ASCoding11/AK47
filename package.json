@@ -10,6 +10,10 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test test/*.test.js",
-    "build:pages": "node scripts/build-pages.js"
+    "build:pages": "node scripts/build-pages.js",
+    "test:firestore": "npx -y firebase-tools@15.36.0 emulators:exec --only firestore --project demo-crowdline \"node --test --test-force-exit test/firestore.test.js\""
+  },
+  "devDependencies": {
+    "firebase": "^10.12.2"
   }
 }

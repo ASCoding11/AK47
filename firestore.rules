@@ -1,12 +1,222 @@
 rules_version = '2';
 
-// Browsers never touch the database directly. Every read and write goes
-// through the `api` Cloud Function, which uses the Admin SDK (rules don't
-// apply to it), so nobody can edit their own balance or anyone else's bets.
+// Crowdline on Firebase's free (Spark) plan: browsers write to Firestore
+// directly, so these rules are what keep the play money honest. Every balance
+// change must come with the document that justifies it, in the same write:
+//   * placing a bet:   the new order, costing exactly price x qty
+//   * cancelling:      the order going from open to cancelled, refunding what's left
+//   * being matched:   a new fill between two crossing bets, crediting any
+//                      better price than the bettor asked for
+// Payouts are made by the admin (the first member to sign up), who verifies
+// every result. Positions are never stored; they are worked out from fills.
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if false;
+
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/meta/admin)
+        && get(/databases/$(database)/documents/meta/admin).data.uid == me();
+    }
+    function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    function now() { return request.time.toMillis(); }
+    function orderDoc(id) { return /databases/$(database)/documents/orders/$(id); }
+    function fillDoc(id) { return /databases/$(database)/documents/fills/$(id); }
+    function userDoc(id) { return /databases/$(database)/documents/users/$(id); }
+    function marketDoc(id) { return /databases/$(database)/documents/markets/$(id); }
+
+    // The first member to sign up claims the admin role, once.
+    match /meta/admin {
+      allow read: if true;
+      allow create: if signedIn() && request.resource.data.keys().hasOnly(['uid'])
+        && request.resource.data.uid == me();
+    }
+
+    // Running totals only the admin keeps (Crowdline's cut).
+    match /meta/stats {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /usernames/{name} {
+      allow read: if true;
+      allow create: if signedIn() && request.resource.data.keys().hasOnly(['uid'])
+        && request.resource.data.uid == me()
+        && getAfter(userDoc(me())).data.username.lower() == name;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (uid == me() || isAdmin());
+
+      // Joining: exactly 1,000 Avenues, once (users can't delete themselves).
+      allow create: if signedIn() && uid == me()
+        && request.resource.data.keys().hasOnly(['username', 'balance', 'lastOp', 'lastOpType', 'createdAt'])
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[A-Za-z0-9_]{3,20}$')
+        && request.resource.data.balance == 100000
+        && request.resource.data.lastOp == 'join' && request.resource.data.lastOpType == 'join'
+        && request.resource.data.createdAt == request.time
+        && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username.lower())).data.uid == uid;
+
+      allow update: if isAdmin() || (signedIn() && uid == me()
+        && changed().hasOnly(['balance', 'lastOp', 'lastOpType'])
+        && request.resource.data.balance is int && request.resource.data.balance >= 0
+        && validBalanceChange(request.resource.data, resource.data.balance));
+
+      function validBalanceChange(next, before) {
+        return (next.lastOpType == 'order' && placedOrder(next.lastOp, next.balance - before))
+          || (next.lastOpType == 'cancel' && cancelledOrder(next.lastOp, next.balance - before))
+          || (next.lastOpType == 'fill' && newFill(next.lastOp, next.balance - before));
+      }
+      // A new order of mine, paid for in full.
+      function placedOrder(id, delta) {
+        return !exists(orderDoc(id))
+          && getAfter(orderDoc(id)).data.uid == me()
+          && delta == -(getAfter(orderDoc(id)).data.price * getAfter(orderDoc(id)).data.qty);
+      }
+      // One of my open orders, now cancelled, refunding what was never matched.
+      function cancelledOrder(id, delta) {
+        return get(orderDoc(id)).data.uid == me()
+          && get(orderDoc(id)).data.status == 'open'
+          && getAfter(orderDoc(id)).data.status == 'cancelled'
+          && delta == (get(orderDoc(id)).data.qty - get(orderDoc(id)).data.filled) * get(orderDoc(id)).data.price;
+      }
+      // A new fill where I'm the newer bet: I get back the difference between
+      // what I offered and the waiting bet's price.
+      function newFill(id, delta) {
+        return !exists(fillDoc(id))
+          && getAfter(fillDoc(id)).data.takerUid == me()
+          && delta == (getAfter(fillDoc(id)).data.takerPrice - (100 - getAfter(fillDoc(id)).data.makerPrice))
+            * getAfter(fillDoc(id)).data.qty;
+      }
+
+      match /ledger/{entry} {
+        allow read: if signedIn() && (uid == me() || isAdmin());
+        allow create: if isAdmin() || (signedIn() && uid == me());
+      }
+    }
+
+    match /markets/{id} {
+      allow read: if true;
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['question', 'description', 'category', 'closesAt', 'creatorId',
+             'creator', 'status', 'volume', 'lastPrice', 'lastFill', 'createdAt'])
+        && request.resource.data.creatorId == me()
+        && request.resource.data.creator == get(userDoc(me())).data.username
+        && request.resource.data.question is string
+        && request.resource.data.question.size() >= 10 && request.resource.data.question.size() <= 200
+        && request.resource.data.description is string
+        && request.resource.data.description.size() >= 20 && request.resource.data.description.size() <= 2000
+        && request.resource.data.category in ['Politics', 'Sports', 'Economics', 'Tech', 'Culture', 'Science', 'Other']
+        && request.resource.data.closesAt is int
+        && request.resource.data.closesAt >= now() + 4 * 60 * 1000
+        && request.resource.data.closesAt <= now() + 3 * 366 * 24 * 60 * 60 * 1000
+        && request.resource.data.status == 'open'
+        && request.resource.data.volume == 0 && request.resource.data.lastPrice == null
+        && request.resource.data.lastFill == null
+        && request.resource.data.createdAt == request.time;
+
+      allow update: if isAdmin()
+        // A match: volume and last price follow the new fill exactly.
+        || (signedIn() && changed().hasOnly(['volume', 'lastPrice', 'lastFill'])
+          && !exists(fillDoc(request.resource.data.lastFill))
+          && getAfter(fillDoc(request.resource.data.lastFill)).data.marketId == id
+          && request.resource.data.volume == resource.data.volume + getAfter(fillDoc(request.resource.data.lastFill)).data.qty
+          && request.resource.data.lastPrice == getAfter(fillDoc(request.resource.data.lastFill)).data.yesPrice)
+        // The creator reports the result with a source; trading stops.
+        || (signedIn() && resource.data.creatorId == me() && resource.data.status == 'open'
+          && changed().hasOnly(['status', 'proposedOutcome', 'reportNote', 'reportedAt'])
+          && request.resource.data.status == 'proposed'
+          && request.resource.data.proposedOutcome in ['yes', 'no', 'void']
+          && request.resource.data.reportNote is string
+          && request.resource.data.reportNote.size() >= 5 && request.resource.data.reportNote.size() <= 1000
+          && request.resource.data.reportedAt == request.time);
+
+      allow delete: if isAdmin();
+    }
+
+    match /orders/{id} {
+      allow read: if true;
+
+      // A new bet on an open market, paid for in the same write.
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['marketId', 'uid', 'side', 'price', 'qty', 'filled', 'status',
+             'createdAt', 'lastFill'])
+        && request.resource.data.uid == me()
+        && get(marketDoc(request.resource.data.marketId)).data.status == 'open'
+        && get(marketDoc(request.resource.data.marketId)).data.closesAt > now()
+        && request.resource.data.side in ['yes', 'no']
+        && request.resource.data.price is int && request.resource.data.price >= 1 && request.resource.data.price <= 99
+        && request.resource.data.qty is int && request.resource.data.qty >= 1 && request.resource.data.qty <= 100000
+        && request.resource.data.filled == 0 && request.resource.data.status == 'open'
+        && request.resource.data.lastFill == null
+        && request.resource.data.createdAt == request.time
+        && getAfter(userDoc(me())).data.lastOp == id && getAfter(userDoc(me())).data.lastOpType == 'order';
+
+      allow update: if isAdmin()
+        // The owner cancels, refunding in the same write.
+        || (signedIn() && resource.data.uid == me() && resource.data.status == 'open'
+          && changed().hasOnly(['status']) && request.resource.data.status == 'cancelled'
+          && getAfter(userDoc(me())).data.lastOp == id && getAfter(userDoc(me())).data.lastOpType == 'cancel')
+        // A match: `filled` grows by exactly the new fill's size.
+        || (signedIn() && resource.data.status == 'open'
+          && changed().hasOnly(['filled', 'lastFill'])
+          && !exists(fillDoc(request.resource.data.lastFill))
+          && (getAfter(fillDoc(request.resource.data.lastFill)).data.makerOrder == id
+            || getAfter(fillDoc(request.resource.data.lastFill)).data.takerOrder == id)
+          && request.resource.data.filled == resource.data.filled + getAfter(fillDoc(request.resource.data.lastFill)).data.qty
+          && request.resource.data.filled <= resource.data.qty);
+    }
+
+    // A match between a waiting bet (maker) and a newer crossing bet (taker),
+    // created by the taker. Fills are permanent.
+    match /fills/{id} {
+      allow read: if true;
+      allow create: if signedIn() && validFill(request.resource.data);
+
+      function validFill(f) {
+        let maker = get(orderDoc(f.makerOrder)).data;
+        let taker = get(orderDoc(f.takerOrder)).data;
+        let market = get(marketDoc(f.marketId)).data;
+        return f.keys().hasOnly(['marketId', 'makerOrder', 'takerOrder', 'makerUid', 'takerUid', 'makerSide',
+            'makerPrice', 'takerPrice', 'yesPrice', 'qty', 'at'])
+          && taker.uid == me() && f.takerUid == me()
+          && maker.uid != me() && f.makerUid == maker.uid
+          && maker.marketId == f.marketId && taker.marketId == f.marketId
+          && market.status == 'open' && market.closesAt > now()
+          && maker.status == 'open' && taker.status == 'open'
+          && maker.side != taker.side && f.makerSide == maker.side
+          && maker.createdAt < taker.createdAt
+          && maker.price + taker.price >= 100
+          && f.makerPrice == maker.price && f.takerPrice == taker.price
+          && f.yesPrice == (maker.side == 'yes' ? maker.price : 100 - maker.price)
+          && f.qty is int && f.qty >= 1
+          && f.qty <= maker.qty - maker.filled && f.qty <= taker.qty - taker.filled
+          && f.at == request.time
+          && getAfter(orderDoc(f.makerOrder)).data.filled == maker.filled + f.qty
+          && getAfter(orderDoc(f.takerOrder)).data.filled == taker.filled + f.qty
+          && getAfter(userDoc(me())).data.lastOp == id
+          && getAfter(marketDoc(f.marketId)).data.lastFill == id;
+      }
+    }
+
+    // What each member was paid when a market settled. Written by the admin.
+    match /settlements/{id} {
+      allow read: if signedIn() && (resource.data.uid == me() || isAdmin());
+      allow write: if isAdmin();
+    }
+
+    // Content reports: one per member per market, read by the admin.
+    match /reports/{id} {
+      allow read: if isAdmin();
+      allow create, update: if signedIn()
+        && request.resource.data.keys().hasOnly(['marketId', 'uid', 'reporter', 'reason', 'at'])
+        && id == request.resource.data.marketId + '_' + me()
+        && request.resource.data.uid == me()
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() >= 5 && request.resource.data.reason.size() <= 1000
+        && request.resource.data.at == request.time;
     }
   }
 }

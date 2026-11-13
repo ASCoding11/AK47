@@ -75,35 +75,30 @@ accounts so it stays usable. Once it is set, new accounts come only from Google.
 Until `ads.client` is set, labelled "Ad space" boxes show where ads will go.
 Set `ads.showPlaceholders` to `false` to hide them.
 
-## Shared markets on Firebase
+## Shared markets on Firebase (free Spark plan)
 
-With shared markets on, the GitHub Pages site stores every market, bet and
-balance in Firestore, and a Cloud Function (`functions/`) processes every
-request, so everyone sees the same markets and nobody can edit their balance.
-Browsers can't read or write the database directly (`firestore.rules`).
+With shared markets on, the GitHub Pages site keeps every market, bet and
+balance in Firestore, so everyone sees the same markets. There is no server:
+browsers read and write Firestore directly, and `firestore.rules` checks every
+write. A balance can only change together with the bet, cancellation or match
+that justifies it, so nobody can give themselves Avenues, refund a bet twice,
+or match someone at a price they didn't offer. Payouts are made by the admin
+(the first member to sign up) from their own browser when they verify a
+result. Every query filters on one field, so no indexes need creating.
 
 One-time setup, in the [Firebase console](https://console.firebase.google.com/project/crowdline-243a7):
 
-1. **Upgrade to the Blaze plan** (Usage and billing → Details & settings →
-   Modify plan). Cloud Functions need it; a small site normally stays inside
-   the free monthly allowance. Add a budget alert while you're there.
-2. **Create the database**: Build → Firestore Database → Create database →
-   Start in production mode → location `nam5 (United States)`.
-3. **Deploy** from [Cloud Shell](https://shell.cloud.google.com/?show=terminal)
-   (nothing to install on your computer):
+1. **Create the database**: Build → Firestore Database → Create database →
+   Start in production mode → pick a location (for example `nam5`).
+2. **Publish the rules**: Firestore Database → Rules → replace everything with
+   the contents of `firestore.rules` → Publish.
+3. Set `sharedMarkets: true` under `firebase` in `src/site-config.js`, run
+   `npm run build:pages`, and push. **Sign in straight away**: the first member
+   to sign in becomes the admin who verifies results.
 
-   ```sh
-   git clone -b claude/confident-lovelace-o7r86g https://github.com/ASCoding11/AK47.git
-   cd AK47/functions && npm install && cd ..
-   npx -y firebase-tools@15.36.0 login --no-localhost
-   npx -y firebase-tools@15.36.0 deploy --only functions,firestore --project crowdline-243a7
-   ```
-
-4. Set `sharedMarkets: true` under `firebase` in `src/site-config.js`, run
-   `npm run build:pages`, and push. **Sign in straight away**: the first
-   member to sign in becomes the admin who verifies results.
-
-Redeploy (step 3, from `git pull`) whenever `functions/` changes.
+Re-publish the rules (step 2) whenever `firestore.rules` changes.
+`npm run test:firestore` runs the engine and rules tests against the local
+Firestore emulator (needs Java).
 
 ## How the marketplace works
 
@@ -138,7 +133,7 @@ the same through randomized trading.
 - `src/site-config.js`: Google sign-in and AdSense settings
 - `server.js`: HTTP API and static file server
 - `public/`: single-page web app
-- `functions/`: the shared Firestore engine and the `api` Cloud Function
+- `src/firestore-engine.js` and `firestore.rules`: shared markets on Firebase
 - `pages/`: how the GitHub Pages app reaches the exchange (shared or in-browser)
 - `test/`: tests for all three engines (server, in-browser, Firestore)
 

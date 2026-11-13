@@ -805,9 +805,9 @@ function privacyPage() {
 async function render() {
   await refreshUser().catch(() => renderNav());
   const hash = location.hash || '#/';
-  const market = /^#\/m\/(\d+)$/.exec(hash);
+  const market = /^#\/m\/([A-Za-z0-9_-]{1,64})$/.exec(hash);
   try {
-    if (market) await marketPage(Number(market[1]));
+    if (market) await marketPage(market[1]);
     else if (hash === '#/create') createPage();
     else if (hash === '#/login') authPage('login');
     else if (hash === '#/signup') authPage('signup');
